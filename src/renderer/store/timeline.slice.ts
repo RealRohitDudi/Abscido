@@ -6,16 +6,20 @@ export interface TimelineSlice {
   playheadMs: number;
   isPlaying: boolean;
   totalDurationMs: number;
-  selectedClipId: number | null;
+  selectedClipId: number | null; // Primary selected clip
+  selectedClipIds: number[];     // All selected (includes linked pair)
 
   setClips: (clips: TimelineClip[]) => void;
   addClip: (clip: TimelineClip) => void;
+  addClips: (clips: TimelineClip[]) => void;
   removeClip: (clipId: number) => void;
+  removeClips: (clipIds: number[]) => void;
   updateClip: (clipId: number, updates: Partial<TimelineClip>) => void;
   trimClip: (clipId: number, inPointMs: number, outPointMs: number) => void;
   setPlayhead: (ms: number) => void;
   setIsPlaying: (playing: boolean) => void;
   setSelectedClip: (clipId: number | null) => void;
+  setSelectedClipIds: (clipIds: number[]) => void;
   seekTo: (ms: number) => void;
   calculateTotalDuration: () => void;
 }
@@ -31,6 +35,7 @@ export const createTimelineSlice: StateCreator<
   isPlaying: false,
   totalDurationMs: 0,
   selectedClipId: null,
+  selectedClipIds: [],
 
   setClips: (clips) => {
     set({ clips }, false, 'timeline/setClips');
@@ -46,11 +51,30 @@ export const createTimelineSlice: StateCreator<
     get().calculateTotalDuration();
   },
 
+  addClips: (clips) => {
+    set(
+      (state) => ({ clips: [...state.clips, ...clips] }),
+      false,
+      'timeline/addClips',
+    );
+    get().calculateTotalDuration();
+  },
+
   removeClip: (clipId) => {
     set(
       (state) => ({ clips: state.clips.filter((c) => c.id !== clipId) }),
       false,
       'timeline/removeClip',
+    );
+    get().calculateTotalDuration();
+  },
+
+  removeClips: (clipIds) => {
+    const idSet = new Set(clipIds);
+    set(
+      (state) => ({ clips: state.clips.filter((c) => !idSet.has(c.id)) }),
+      false,
+      'timeline/removeClips',
     );
     get().calculateTotalDuration();
   },
@@ -81,8 +105,23 @@ export const createTimelineSlice: StateCreator<
 
   setIsPlaying: (playing) => set({ isPlaying: playing }, false, 'timeline/setIsPlaying'),
 
-  setSelectedClip: (clipId) =>
-    set({ selectedClipId: clipId }, false, 'timeline/setSelectedClip'),
+  setSelectedClip: (clipId) => {
+    const { clips } = get();
+    if (clipId === null) {
+      set({ selectedClipId: null, selectedClipIds: [] }, false, 'timeline/setSelectedClip');
+      return;
+    }
+    // Find the clip and its linked partner
+    const clip = clips.find((c) => c.id === clipId);
+    const ids = [clipId];
+    if (clip?.linkedClipId) {
+      ids.push(clip.linkedClipId);
+    }
+    set({ selectedClipId: clipId, selectedClipIds: ids }, false, 'timeline/setSelectedClip');
+  },
+
+  setSelectedClipIds: (clipIds) =>
+    set({ selectedClipIds: clipIds, selectedClipId: clipIds[0] ?? null }, false, 'timeline/setSelectedClipIds'),
 
   seekTo: (ms) => set({ playheadMs: ms }, false, 'timeline/seekTo'),
 

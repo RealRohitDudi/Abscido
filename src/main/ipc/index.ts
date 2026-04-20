@@ -242,13 +242,90 @@ export function registerAllHandlers(): void {
       },
     ) => {
       try {
-        const clip = clipRepo.createClip(payload);
-        return { success: true, data: clip };
+        const mediaFile = clipRepo.findMediaFileById(payload.mediaFileId);
+        const hasVideo = mediaFile && mediaFile.width > 0;
+        // Audio-only files have codec that doesn't have video stream, or width = 0
+        // We detect audio by checking if the media file has no video (width === 0)
+        const isAudioOnly = mediaFile && mediaFile.width === 0;
+        const hasAudio = true; // All media files have audio (we can refine later)
+
+        if (hasVideo && !isAudioOnly) {
+          // Create video clip on track 0 and audio clip on track 1 — linked
+          const videoClip = clipRepo.createClip({
+            projectId: payload.projectId,
+            mediaFileId: payload.mediaFileId,
+            positionMs: payload.positionMs,
+            inPointMs: payload.inPointMs,
+            outPointMs: payload.outPointMs,
+            track: 0,
+            clipType: 'video',
+            linkedClipId: null,
+          });
+
+          const audioClip = clipRepo.createClip({
+            projectId: payload.projectId,
+            mediaFileId: payload.mediaFileId,
+            positionMs: payload.positionMs,
+            inPointMs: payload.inPointMs,
+            outPointMs: payload.outPointMs,
+            track: 1,
+            clipType: 'audio',
+            linkedClipId: videoClip.id,
+          });
+
+          // Link the video clip back to the audio clip
+          clipRepo.updateClip(videoClip.id, { linkedClipId: audioClip.id });
+          const updatedVideoClip = clipRepo.findClipById(videoClip.id)!;
+
+          return { success: true, data: [updatedVideoClip, audioClip] };
+        } else {
+          // Audio-only: single clip on audio track
+          const clip = clipRepo.createClip({
+            ...payload,
+            clipType: 'audio',
+            linkedClipId: null,
+          });
+          return { success: true, data: [clip] };
+        }
       } catch (err) {
         return {
           success: false,
           error: err instanceof Error ? err.message : String(err),
           code: 'ADD_CLIP_ERROR',
+        };
+      }
+    },
+  );
+
+  ipcMain.handle('clip:delete', (_event, payload: { clipId: number }) => {
+    try {
+      // Also delete the linked clip if exists
+      const clip = clipRepo.findClipById(payload.clipId);
+      if (clip?.linkedClipId) {
+        clipRepo.deleteClip(clip.linkedClipId);
+      }
+      clipRepo.deleteClip(payload.clipId);
+      return { success: true, data: null };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+        code: 'DELETE_CLIP_ERROR',
+      };
+    }
+  });
+
+  ipcMain.handle(
+    'clip:updateLink',
+    (_event, payload: { clipId: number; linkedClipId: number | null }) => {
+      try {
+        clipRepo.updateClip(payload.clipId, { linkedClipId: payload.linkedClipId });
+        return { success: true, data: null };
+      } catch (err) {
+        return {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          code: 'UPDATE_LINK_ERROR',
         };
       }
     },

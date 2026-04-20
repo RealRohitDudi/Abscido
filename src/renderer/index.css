@@ -94,19 +94,37 @@ body {
 }
 
 .timeline-clip {
-  @apply absolute top-1 bottom-1 rounded cursor-pointer flex items-center overflow-hidden;
-  background: linear-gradient(180deg, #5a4fd4 0%, #3d39a8 100%);
-  border: 1px solid rgba(124, 108, 250, 0.4);
-  transition: filter 0.15s ease;
+  @apply absolute rounded cursor-pointer overflow-hidden;
+  transition: filter 0.12s ease, box-shadow 0.12s ease;
+  border: 1px solid transparent;
 }
 
 .timeline-clip:hover {
+  filter: brightness(1.12);
+}
+
+/* Video clip — blue, like Resolve's V1 */
+.timeline-clip.video-clip {
+  background: linear-gradient(180deg, #2a5bcf 0%, #1d4499 100%);
+  border-color: rgba(90, 140, 230, 0.5);
+}
+
+/* Audio clip — green, like Resolve's A1 */
+.timeline-clip.audio-clip {
+  background: linear-gradient(180deg, #1a6632 0%, #124d25 100%);
+  border-color: rgba(52, 168, 83, 0.5);
+}
+
+.timeline-clip.selected.video-clip {
+  border-color: #5a8ce6;
+  box-shadow: 0 0 0 2px rgba(90, 140, 230, 0.5);
   filter: brightness(1.15);
 }
 
-.timeline-clip.selected {
-  border-color: #7c6cfa;
-  box-shadow: 0 0 0 2px rgba(124, 108, 250, 0.4);
+.timeline-clip.selected.audio-clip {
+  border-color: #34a853;
+  box-shadow: 0 0 0 2px rgba(52, 168, 83, 0.5);
+  filter: brightness(1.15);
 }
 
 .timeline-deleted-region {
@@ -125,8 +143,8 @@ body {
 /* ─── Playhead ────────────────────────────────────────────────────────────── */
 .playhead-line {
   @apply absolute top-0 bottom-0 w-[2px] pointer-events-none;
-  background: #7c6cfa;
-  z-index: 10;
+  background: #e85757;
+  z-index: 20;
 }
 
 .playhead-line::before {
@@ -136,8 +154,57 @@ body {
   left: -5px;
   width: 12px;
   height: 12px;
-  background: #7c6cfa;
+  background: #e85757;
   clip-path: polygon(50% 0%, 0% 40%, 100% 40%);
+}
+
+/* ─── Context Menu ────────────────────────────────────────────────────────── */
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  background: #242424;
+  border: 1px solid #3a3a3a;
+  border-radius: 8px;
+  padding: 4px;
+  min-width: 180px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6), 0 2px 8px rgba(0, 0, 0, 0.4);
+  animation: contextMenuIn 0.1s ease;
+}
+
+@keyframes contextMenuIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+.context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: #e0e0e0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s ease;
+}
+
+.context-menu-item:hover {
+  background: rgba(255,255,255,0.08);
+  color: #fff;
+}
+
+.context-menu-item:active {
+  background: rgba(255,255,255,0.12);
+}
+
+.context-menu-separator {
+  height: 1px;
+  background: #3a3a3a;
+  margin: 3px 6px;
 }
 
 /* ─── Panel & Card Styles ─────────────────────────────────────────────────── */

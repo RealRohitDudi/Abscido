@@ -15,28 +15,28 @@ export const WorkspaceLayout: React.FC = () => {
         <MediaBin />
       </div>
 
-      {/* Center Panel: Video Player + Transcript Editor */}
-      <div className="flex flex-col flex-1 overflow-hidden min-w-0">
-        {/* Video Player — 40% of center height */}
+      {/* Center Panel: Video Player + Timeline */}
+      <div className="flex flex-col flex-1 overflow-hidden min-w-0 border-r border-border">
+        {/* Video Player — 50% of center height */}
         <div
           className="flex-shrink-0 border-b border-border"
-          style={{ height: '40%', minHeight: 180 }}
+          style={{ height: '50%', minHeight: 180 }}
         >
           <VideoPlayer />
         </div>
 
-        {/* Transcript Editor — 60% of center height */}
+        {/* Timeline — 50% of center height */}
         <div className="flex-1 overflow-hidden">
-          <TranscriptEditor />
+          <Timeline />
         </div>
       </div>
 
-      {/* Right Panel: Timeline + Export (320px) */}
+      {/* Right Panel: Transcript Editor (360px) */}
       <div
-        className="flex flex-col flex-shrink-0 border-l border-border overflow-hidden"
-        style={{ width: 320 }}
+        className="flex flex-col flex-shrink-0 overflow-hidden bg-background"
+        style={{ width: 360 }}
       >
-        <Timeline />
+        <TranscriptEditor />
       </div>
     </div>
   );

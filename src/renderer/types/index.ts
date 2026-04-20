@@ -53,6 +53,7 @@ declare global {
         MEDIA_IMPORT: string;
         MEDIA_PROBE: string;
         MEDIA_THUMBNAIL: string;
+        MEDIA_WAVEFORM_DATA: string;
         TRANSCRIBE_CLIP: string;
         TRANSCRIBE_PROGRESS: string;
         EDIT_COMPILE: string;

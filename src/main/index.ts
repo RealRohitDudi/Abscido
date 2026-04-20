@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, shell } from 'electron';
+import { app, BrowserWindow, Menu, shell, protocol, net } from 'electron';
 import path from 'path';
 import { getDatabase, closeDatabase } from './db/database';
 import { registerAllHandlers } from './ipc/index';
@@ -8,6 +8,31 @@ import { projectService } from './services/project.service';
 const isDev = !app.isPackaged;
 
 let mainWindow: BrowserWindow | null = null;
+
+// ─── Codec & hardware acceleration flags (must be set before app.whenReady) ─────
+// These unlock HEVC / H.265, hardware decoding, and .mov support on macOS
+app.commandLine.appendSwitch('enable-accelerated-video-decode');
+app.commandLine.appendSwitch('enable-gpu-rasterization');
+if (process.platform === 'darwin') {
+  // Enable macOS native HEVC decoder (needed for many .mov screen recordings)
+  app.commandLine.appendSwitch('enable-features', 'PlatformHEVCDecoderSupport');
+}
+
+// ─── Media protocol (must register scheme BEFORE app is ready) ───────────────
+// Allows the renderer to load local media files via media:///absolute/path
+// with full range-request support (required for video seeking).
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'media',
+    privileges: {
+      secure: true,
+      standard: true,
+      stream: true,
+      supportFetchAPI: true,
+      bypassCSP: true,
+    },
+  },
+]);
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -162,6 +187,53 @@ function buildAppMenu(): void {
 app.whenReady().then(() => {
   // Initialize database
   getDatabase();
+
+  // Register media:// protocol with correct MIME types and range-request support.
+  // net.fetch('file://') may return Content-Type: application/octet-stream which
+  // Chromium rejects. We rebuild the response with the correct video/* type.
+  const MIME_MAP: Record<string, string> = {
+    '.mov':  'video/quicktime',
+    '.mp4':  'video/mp4',
+    '.m4v':  'video/mp4',
+    '.mkv':  'video/x-matroska',
+    '.avi':  'video/x-msvideo',
+    '.webm': 'video/webm',
+    '.ogv':  'video/ogg',
+    '.mp3':  'audio/mpeg',
+    '.aac':  'audio/aac',
+    '.wav':  'audio/wav',
+    '.m4a':  'audio/mp4',
+    '.ogg':  'audio/ogg',
+    '.flac': 'audio/flac',
+  };
+
+  protocol.handle('media', async (request) => {
+    // Path is passed as query param ?p= to avoid Electron's standard-protocol
+    // host-normalization bug (media:///Users/foo → media://users/foo, losing leading /)
+    const url = new URL(request.url);
+    const filePath = url.searchParams.get('p') ?? '';
+    if (!filePath) return new Response('Missing path', { status: 400 });
+
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = MIME_MAP[ext] ?? 'video/mp4';
+
+    try {
+      // Encode spaces/special chars but keep slashes
+      const encoded = filePath.split('/').map(encodeURIComponent).join('/');
+      const response = await net.fetch('file://' + encoded);
+      const headers = new Headers(response.headers);
+      headers.set('Content-Type', contentType);
+      headers.set('Accept-Ranges', 'bytes');
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
+    } catch (err) {
+      console.error('[media://] failed to serve:', filePath, err);
+      return new Response('File not found', { status: 404 });
+    }
+  });
 
   // Crash recovery: clean up orphaned temp files
   projectService.recoverFromCrash();

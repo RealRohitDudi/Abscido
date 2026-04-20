@@ -78,7 +78,17 @@ export function registerMediaHandlers(): void {
     IpcChannel.MEDIA_THUMBNAIL,
     async (_event, payload: { filePath: string; timeMs: number; mediaFileId?: number }) => {
       try {
-        const thumbPath = await ffmpegService.generateThumbnail(payload.filePath, payload.timeMs);
+        let isAudioOnly = false;
+        if (payload.mediaFileId) {
+          const mediaFile = clipRepo.findMediaFileById(payload.mediaFileId);
+          if (mediaFile && mediaFile.width === 0) {
+            isAudioOnly = true;
+          }
+        }
+
+        const thumbPath = isAudioOnly 
+          ? await ffmpegService.generateWaveformThumbnail(payload.filePath)
+          : await ffmpegService.generateThumbnail(payload.filePath, payload.timeMs);
 
         // Read and convert to base64
         const data = fs.readFileSync(thumbPath);
@@ -99,6 +109,27 @@ export function registerMediaHandlers(): void {
           success: false,
           error: err instanceof Error ? err.message : String(err),
           code: 'THUMBNAIL_ERROR',
+        };
+        return response;
+      }
+    },
+  );
+
+  // ─── MEDIA_WAVEFORM_DATA: Extract and return PCM peak array ─────────────────
+  ipcMain.handle(
+    IpcChannel.MEDIA_WAVEFORM_DATA,
+    async (_event, payload: { filePath: string; mediaFileId: number }) => {
+      try {
+        const dataPath = await ffmpegService.generateWaveformData(payload.filePath, payload.mediaFileId);
+        const data = fs.readFileSync(dataPath);
+        const base64 = data.toString('base64');
+        const response: IpcResult<string> = { success: true, data: base64 };
+        return response;
+      } catch (err) {
+        const response: IpcResult<never> = {
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+          code: 'WAVEFORM_ERROR',
         };
         return response;
       }

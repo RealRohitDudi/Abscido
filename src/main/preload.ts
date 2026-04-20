@@ -35,6 +35,7 @@ const electronAPI = {
     MEDIA_IMPORT: 'media:import',
     MEDIA_PROBE: 'media:probe',
     MEDIA_THUMBNAIL: 'media:thumbnail',
+    MEDIA_WAVEFORM_DATA: 'media:waveformData',
     TRANSCRIBE_CLIP: 'transcribe:clip',
     TRANSCRIBE_PROGRESS: 'transcribe:progress',
     WHISPER_LOCAL_LIST_MODELS: 'whisper-local:listModels',

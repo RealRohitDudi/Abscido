@@ -30,6 +30,8 @@ export interface TimelineClip {
   outPointMs: number;
   track: number;
   isDeleted: boolean;
+  clipType: 'video' | 'audio';
+  linkedClipId: number | null;
   createdAt: string;
 }
 

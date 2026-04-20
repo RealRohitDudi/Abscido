@@ -44,6 +44,10 @@ const MediaCard: React.FC<MediaCardProps> = ({ file, onAddToTimeline, onRemove }
     <div
       className="group card overflow-hidden cursor-pointer hover:border-accent/40 transition-all duration-150"
       draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData('application/json', JSON.stringify({ type: 'mediaFile', file }));
+        e.dataTransfer.effectAllowed = 'copy';
+      }}
     >
       {/* Thumbnail */}
       <div
@@ -97,7 +101,7 @@ const MediaCard: React.FC<MediaCardProps> = ({ file, onAddToTimeline, onRemove }
 
 export const MediaBin: React.FC = () => {
   const { mediaFiles, removeMediaFile, currentProject } = useProject();
-  const { clips, addClip } = useTimeline();
+  const { clips, addClips } = useTimeline();
   const { setTranscribing, setTranscribeProgress, loadTranscript } = useTranscript();
   const addToast = useStore((s) => s.addToast);
   const { invoke } = useIpc();
@@ -112,7 +116,7 @@ export const MediaBin: React.FC = () => {
       }, 0);
 
       try {
-        const result = await invoke<IpcResult<TimelineClip>>(
+        const result = await invoke<IpcResult<TimelineClip[]>>(
           window.electronAPI.channels.CLIP_ADD,
           {
             projectId: currentProject.id,
@@ -129,14 +133,13 @@ export const MediaBin: React.FC = () => {
           return;
         }
 
-        const clip = result.data;
-        addClip(clip);
+        addClips(result.data);
         addToast({ type: 'success', message: `Added "${file.filePath.split('/').pop()}" to timeline` });
       } catch (err) {
         addToast({ type: 'error', message: 'Failed to add clip to timeline' });
       }
     },
-    [currentProject, clips, addClip, addToast, invoke],
+    [currentProject, clips, addClips, addToast, invoke],
   );
 
   const handleRemove = useCallback(

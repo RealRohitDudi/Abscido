@@ -113,14 +113,18 @@ export const useTimeline = () =>
     isPlaying: s.isPlaying,
     totalDurationMs: s.totalDurationMs,
     selectedClipId: s.selectedClipId,
+    selectedClipIds: s.selectedClipIds,
     setClips: s.setClips,
     addClip: s.addClip,
+    addClips: s.addClips,
     removeClip: s.removeClip,
+    removeClips: s.removeClips,
     updateClip: s.updateClip,
     trimClip: s.trimClip,
     setPlayhead: s.setPlayhead,
     setIsPlaying: s.setIsPlaying,
     setSelectedClip: s.setSelectedClip,
+    setSelectedClipIds: s.setSelectedClipIds,
     seekTo: s.seekTo,
   }));
 

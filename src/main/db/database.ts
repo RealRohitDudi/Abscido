@@ -32,6 +32,7 @@ function runMigrations(database: Database.Database): void {
   if (!fs.existsSync(migrationsDir)) {
     // Fallback: run inline migration
     runInlineMigration(database, 1, appliedSet);
+    runMigrationV2(database, appliedSet);
     return;
   }
 
@@ -83,15 +84,17 @@ function runInlineMigration(
     );
 
     CREATE TABLE IF NOT EXISTS timeline_clips (
-      id            INTEGER PRIMARY KEY AUTOINCREMENT,
-      project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-      media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
-      position_ms   INTEGER NOT NULL DEFAULT 0,
-      in_point_ms   INTEGER NOT NULL DEFAULT 0,
-      out_point_ms  INTEGER NOT NULL DEFAULT 0,
-      track         INTEGER NOT NULL DEFAULT 0,
-      is_deleted    INTEGER NOT NULL DEFAULT 0,
-      created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id     INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      media_file_id  INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
+      position_ms    INTEGER NOT NULL DEFAULT 0,
+      in_point_ms    INTEGER NOT NULL DEFAULT 0,
+      out_point_ms   INTEGER NOT NULL DEFAULT 0,
+      track          INTEGER NOT NULL DEFAULT 0,
+      is_deleted     INTEGER NOT NULL DEFAULT 0,
+      clip_type      TEXT    NOT NULL DEFAULT 'video',
+      linked_clip_id INTEGER,
+      created_at     TEXT    NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS transcript_words (
@@ -127,6 +130,22 @@ function runInlineMigration(
     database.prepare('INSERT INTO schema_migrations (version) VALUES (?)').run(version);
   })();
   console.log(`[DB] Applied inline migration v${version}`);
+}
+
+function runMigrationV2(
+  database: Database.Database,
+  appliedSet: Set<number>,
+): void {
+  if (appliedSet.has(2)) return;
+  // Add clip_type and linked_clip_id columns to existing databases
+  try {
+    database.exec(`ALTER TABLE timeline_clips ADD COLUMN clip_type TEXT NOT NULL DEFAULT 'video'`);
+  } catch { /* column may already exist */ }
+  try {
+    database.exec(`ALTER TABLE timeline_clips ADD COLUMN linked_clip_id INTEGER`);
+  } catch { /* column may already exist */ }
+  database.prepare('INSERT INTO schema_migrations (version) VALUES (?)').run(2);
+  console.log('[DB] Applied inline migration v2 (clip_type, linked_clip_id)');
 }
 
 export function getDatabase(): Database.Database {

@@ -5,6 +5,7 @@ export enum IpcChannel {
   MEDIA_IMPORT = 'media:import',
   MEDIA_PROBE = 'media:probe',
   MEDIA_THUMBNAIL = 'media:thumbnail',
+  MEDIA_WAVEFORM_DATA = 'media:waveformData',
   MEDIA_ADD_TO_PROJECT = 'media:addToProject',
   CLIP_ADD = 'clip:add',
 
@@ -79,7 +80,8 @@ export interface IpcChannelPayloads {
   };
   [IpcChannel.MEDIA_IMPORT]: { filePaths?: string[] };
   [IpcChannel.MEDIA_PROBE]: { filePath: string };
-  [IpcChannel.MEDIA_THUMBNAIL]: { filePath: string; timeMs: number };
+  [IpcChannel.MEDIA_THUMBNAIL]: { filePath: string; timeMs: number; mediaFileId?: number };
+  [IpcChannel.MEDIA_WAVEFORM_DATA]: { filePath: string; mediaFileId: number };
   [IpcChannel.TRANSCRIBE_CLIP]: { clipId: number; mediaFilePath: string; language: string };
   [IpcChannel.EDIT_COMPILE]: { projectId: number; outputPath: string };
   [IpcChannel.EDIT_PREVIEW_SEGMENT]: { clipId: number; startMs: number; endMs: number };

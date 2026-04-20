@@ -7,7 +7,8 @@ import { app } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { execFileSync } from 'child_process';
+import ffmpegStatic from 'ffmpeg-static';
+import { spawn, execFileSync } from 'child_process';
 import type { MediaInfo, EditDecisionList, ExportPreset } from '../../shared/types';
 
 /**
@@ -165,6 +166,80 @@ export const ffmpegService = {
           reject(new Error(`FFmpeg thumbnail failed: ${err.message}\nStderr: ${stderr}`));
         })
         .on('end', () => resolve(filename));
+    });
+  },
+
+  /**
+   * Generate a waveform PNG thumbnail for audio-only files
+   */
+  generateWaveformThumbnail(filePath: string, outputPath?: string): Promise<string> {
+    const thumbDir = getThumbnailsDir();
+    const filename = outputPath ?? path.join(thumbDir, `thumb_wf_${Date.now()}.png`);
+
+    return new Promise((resolve, reject) => {
+      ffmpeg(filePath)
+        .complexFilter([
+          'showwavespic=s=640x360:colors=#A371F7'
+        ])
+        .frames(1)
+        .output(filename)
+        .on('error', (err, _stdout, stderr) => {
+          reject(new Error(`FFmpeg waveform thumbnail failed: ${err.message}\nStderr: ${stderr}`));
+        })
+        .on('end', () => resolve(filename))
+        .run();
+    });
+  },
+
+  /**
+   * Rapidly extract PCM peaks at 50Hz and save as a Float32Array in a .dat file
+   */
+  generateWaveformData(filePath: string, mediaFileId: number): Promise<string> {
+    const waveformsDir = path.join(app.getPath('userData'), 'waveforms');
+    if (!fs.existsSync(waveformsDir)) fs.mkdirSync(waveformsDir, { recursive: true });
+    
+    const outputPath = path.join(waveformsDir, `media_${mediaFileId}.dat`);
+    if (fs.existsSync(outputPath)) return Promise.resolve(outputPath);
+
+    return new Promise((resolve, reject) => {
+      // ffmpeg-static export path might be default export or property
+      const ffmpegPath = (ffmpegStatic as any).path || ffmpegStatic;
+
+      const ffmpegProc = spawn(ffmpegPath, [
+        '-i', filePath,
+        '-ac', '1',
+        '-ar', '50', // 50 samples per second
+        '-f', 's16le',
+        '-'
+      ]);
+
+      const peaks: number[] = [];
+
+      ffmpegProc.stdout.on('data', (chunk: Buffer) => {
+        // Read 16-bit LE integers
+        for (let i = 0; i < chunk.length - 1; i += 2) {
+          const val = chunk.readInt16LE(i);
+          // Convert to 0 to 1 float (absolute amplitude)
+          peaks.push(Math.abs(val / 32768));
+        }
+      });
+
+      ffmpegProc.on('error', (err) => {
+        reject(err);
+      });
+
+      ffmpegProc.on('close', (code) => {
+        if (code !== 0 && code !== null) {
+          return reject(new Error(`Waveform extraction failed with code ${code}`));
+        }
+        try {
+          const floatArray = new Float32Array(peaks);
+          fs.writeFileSync(outputPath, Buffer.from(floatArray.buffer));
+          resolve(outputPath);
+        } catch (err) {
+          reject(err);
+        }
+      });
     });
   },
 

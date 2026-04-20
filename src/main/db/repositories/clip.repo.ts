@@ -23,6 +23,8 @@ interface TimelineClipRow {
   out_point_ms: number;
   track: number;
   is_deleted: number;
+  clip_type: string;
+  linked_clip_id: number | null;
   created_at: string;
 }
 
@@ -51,6 +53,8 @@ function rowToClip(row: TimelineClipRow): TimelineClip {
     outPointMs: row.out_point_ms,
     track: row.track,
     isDeleted: row.is_deleted === 1,
+    clipType: (row.clip_type as 'video' | 'audio') ?? 'video',
+    linkedClipId: row.linked_clip_id ?? null,
     createdAt: row.created_at,
   };
 }
@@ -110,8 +114,8 @@ export const clipRepo = {
     const db = getDatabase();
     const stmt = db.prepare(`
       INSERT INTO timeline_clips
-        (project_id, media_file_id, position_ms, in_point_ms, out_point_ms, track)
-      VALUES (?, ?, ?, ?, ?, ?)
+        (project_id, media_file_id, position_ms, in_point_ms, out_point_ms, track, clip_type, linked_clip_id)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
     const result = stmt.run(
       data.projectId,
@@ -120,6 +124,8 @@ export const clipRepo = {
       data.inPointMs,
       data.outPointMs,
       data.track,
+      data.clipType ?? 'video',
+      data.linkedClipId ?? null,
     );
     return this.findClipById(result.lastInsertRowid as number)!;
   },
@@ -144,11 +150,11 @@ export const clipRepo = {
 
   updateClip(
     id: number,
-    data: Partial<Pick<TimelineClip, 'positionMs' | 'inPointMs' | 'outPointMs' | 'track'>>,
+    data: Partial<Pick<TimelineClip, 'positionMs' | 'inPointMs' | 'outPointMs' | 'track' | 'linkedClipId'>>,
   ): TimelineClip | null {
     const db = getDatabase();
     const fields: string[] = [];
-    const values: (number | string)[] = [];
+    const values: (number | string | null)[] = [];
 
     if (data.positionMs !== undefined) {
       fields.push('position_ms = ?');
@@ -165,6 +171,10 @@ export const clipRepo = {
     if (data.track !== undefined) {
       fields.push('track = ?');
       values.push(data.track);
+    }
+    if ('linkedClipId' in data) {
+      fields.push('linked_clip_id = ?');
+      values.push(data.linkedClipId ?? null);
     }
 
     if (fields.length === 0) return this.findClipById(id);

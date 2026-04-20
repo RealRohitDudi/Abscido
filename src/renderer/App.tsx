@@ -537,9 +537,8 @@ export const App: React.FC = () => {
       // Space → play/pause (when not in input)
       if (e.key === ' ' && !(e.target instanceof HTMLInputElement) && !(e.target instanceof HTMLTextAreaElement)) {
         e.preventDefault();
-        // Trigger play/pause via store
-        const store = (window as unknown as { __ABSCIDO_STORE__?: { togglePlay: () => void } }).__ABSCIDO_STORE__;
-        store?.togglePlay?.();
+        // Trigger play/pause via Zustand store — always reads latest state
+        useStore.getState().togglePlay();
         return;
       }
 
