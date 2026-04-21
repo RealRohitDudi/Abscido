@@ -1,18 +1,22 @@
 import SwiftUI
+import Combine
 
 /// Transport controls, scrub slider, and playback rate display.
 struct PlayerControlsView: View {
     @Bindable var playerVM: PlayerViewModel
 
+    /// Local time state updated via Combine — avoids @Observable re-renders.
+    @State private var displayTimeMs: Double = 0
+
     var body: some View {
         VStack(spacing: 8) {
             // Scrub slider
             HStack(spacing: 8) {
-                TimecodeView(ms: playerVM.currentTimeMs, fps: 30)
+                TimecodeView(ms: displayTimeMs, fps: 30)
 
                 Slider(
                     value: Binding(
-                        get: { playerVM.currentTimeMs },
+                        get: { displayTimeMs },
                         set: { playerVM.seek(to: $0) }
                     ),
                     in: 0...max(1, playerVM.durationMs)
@@ -90,5 +94,11 @@ struct PlayerControlsView: View {
             }
         }
         .padding(.vertical, 4)
+        .onReceive(playerVM.timeStream.throttle(for: .milliseconds(50), scheduler: RunLoop.main, latest: true)) { ms in
+            displayTimeMs = ms
+        }
+        .onAppear {
+            displayTimeMs = playerVM.currentTimeMs
+        }
     }
 }

@@ -6,7 +6,10 @@ import Foundation
 @MainActor
 @Observable
 final class PlayerViewModel {
-    var currentTimeMs: Double = 0
+    /// Current playback time — updated at 30fps.
+    /// @ObservationIgnored: prevents entire view hierarchy re-render on every tick.
+    /// Views that need this value subscribe to `timeStream` via Combine.
+    @ObservationIgnored var currentTimeMs: Double = 0
     var durationMs: Double = 0
     var isPlaying = false
     var playbackRate: Float = 1.0
@@ -36,8 +39,9 @@ final class PlayerViewModel {
     // MARK: - Setup
 
     private func setupTimeObserver() {
-        // 16ms interval = ~60fps update rate for smooth word highlighting
-        let interval = CMTime(seconds: 0.016, preferredTimescale: 600)
+        // 33ms interval = ~30fps — smooth enough for word highlighting
+        // while halving the SwiftUI re-render load vs 60fps
+        let interval = CMTime(seconds: 0.033, preferredTimescale: 600)
         let playerRef = player
         timeObserver = playerRef.addPeriodicTimeObserver(
             forInterval: interval,

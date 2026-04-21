@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import UniformTypeIdentifiers
 
 // MARK: - NSViewRepresentable Wrapper
@@ -7,9 +8,25 @@ import UniformTypeIdentifiers
 /// High-performance multi-track timeline using NSScrollView + CALayer.
 /// Replaces SwiftUI ScrollView for smooth 60fps scrolling and native pinch-to-zoom.
 struct TimelineNSView: NSViewRepresentable {
-    @Bindable var timelineVM: TimelineViewModel
-    @Bindable var playerVM: PlayerViewModel
+    var timelineVM: TimelineViewModel
+    var playerVM: PlayerViewModel
     var mediaFiles: [MediaFile]
+
+    // Snapshot values for dirty-checking — only rebuild when these change
+    var trackCount: Int
+    var totalDurationMs: Double
+    var pixelsPerSecond: Double
+    var selectedClipIds: Set<String>
+
+    init(timelineVM: TimelineViewModel, playerVM: PlayerViewModel, mediaFiles: [MediaFile]) {
+        self.timelineVM = timelineVM
+        self.playerVM = playerVM
+        self.mediaFiles = mediaFiles
+        self.trackCount = timelineVM.tracks.count
+        self.totalDurationMs = timelineVM.totalDurationMs
+        self.pixelsPerSecond = timelineVM.pixelsPerSecond
+        self.selectedClipIds = timelineVM.selectedClipIds
+    }
 
     func makeNSView(context: Context) -> TimelineScrollContainer {
         let container = TimelineScrollContainer()
@@ -20,7 +37,24 @@ struct TimelineNSView: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TimelineScrollContainer, context: Context) {
-        context.coordinator.syncFromViewModel()
+        let coord = context.coordinator
+
+        // Only rebuild layers if timeline structure or zoom changed
+        let needsRebuild = coord.lastTrackCount != trackCount
+            || coord.lastTotalDurationMs != totalDurationMs
+            || coord.lastPixelsPerSecond != pixelsPerSecond
+            || coord.lastSelectedClipIds != selectedClipIds
+
+        if needsRebuild {
+            coord.lastTrackCount = trackCount
+            coord.lastTotalDurationMs = totalDurationMs
+            coord.lastPixelsPerSecond = pixelsPerSecond
+            coord.lastSelectedClipIds = selectedClipIds
+            coord.rebuildLayers()
+        }
+
+        // Always update playhead — this is cheap (single CALayer position change)
+        coord.updatePlayheadOnly()
     }
 
     func makeCoordinator() -> TimelineCoordinator {
@@ -54,6 +88,7 @@ class TimelineScrollContainer: NSView {
         scrollView.scrollerStyle = .overlay
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
+        scrollView.usesPredominantAxisScrolling = true
 
         let clipView = NSClipView()
         clipView.drawsBackground = true
@@ -96,7 +131,6 @@ class TimelineContentView: NSView {
     let trackHeaderWidth: CGFloat = 60
     let trackHeight: CGFloat = 52
     let rulerHeight: CGFloat = 26
-    let clipGap: CGFloat = 1
 
     // Layers
     private var rulerLayer = CALayer()
@@ -121,16 +155,13 @@ class TimelineContentView: NSView {
     private func setupBaseLayers() {
         guard let rootLayer = layer else { return }
 
-        // Ruler
         rulerLayer.backgroundColor = NSColor(red: 0.12, green: 0.12, blue: 0.12, alpha: 1).cgColor
         rootLayer.addSublayer(rulerLayer)
 
-        // Playhead
         playheadLayer.backgroundColor = NSColor.white.cgColor
         playheadLayer.zPosition = 100
         rootLayer.addSublayer(playheadLayer)
 
-        // Drop indicator
         dropIndicatorLayer.backgroundColor = NSColor(red: 0.486, green: 0.424, blue: 0.980, alpha: 1).cgColor
         dropIndicatorLayer.isHidden = true
         dropIndicatorLayer.zPosition = 99
@@ -143,9 +174,11 @@ class TimelineContentView: NSView {
     // MARK: - Rebuild all clip layers
 
     func rebuildLayers(tracks: [TimelineViewModel.TrackModel], pps: Double, waveformData: [Int64: [Float]]) {
-        guard let rootLayer = layer else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
 
-        // Remove old track and header layers
+        guard let rootLayer = layer else { CATransaction.commit(); return }
+
         trackLayers.forEach { $0.removeFromSuperlayer() }
         headerLayers.forEach { $0.removeFromSuperlayer() }
         trackLayers.removeAll()
@@ -153,27 +186,22 @@ class TimelineContentView: NSView {
 
         let totalWidth = max(bounds.width, totalContentWidth(tracks: tracks, pps: pps))
 
-        // Ruler
         rulerLayer.frame = CGRect(x: 0, y: 0, width: totalWidth, height: rulerHeight)
         rebuildRulerTicks(pps: pps, width: totalWidth)
 
-        // Tracks
         for (index, track) in tracks.enumerated() {
             let trackY = rulerHeight + CGFloat(index) * trackHeight
 
-            // Track header
             let header = makeTrackHeaderLayer(name: track.name, kind: track.kind, y: trackY)
             rootLayer.addSublayer(header)
             headerLayers.append(header)
 
-            // Track background
             let trackBg = CALayer()
             trackBg.frame = CGRect(x: trackHeaderWidth, y: trackY, width: totalWidth - trackHeaderWidth, height: trackHeight)
             trackBg.backgroundColor = index % 2 == 0
                 ? NSColor(red: 0.09, green: 0.09, blue: 0.09, alpha: 1).cgColor
                 : NSColor(red: 0.08, green: 0.08, blue: 0.08, alpha: 1).cgColor
 
-            // Divider line
             let divider = CALayer()
             divider.frame = CGRect(x: 0, y: trackHeight - 0.5, width: trackBg.frame.width, height: 0.5)
             divider.backgroundColor = NSColor(white: 0.2, alpha: 1).cgColor
@@ -182,7 +210,6 @@ class TimelineContentView: NSView {
             rootLayer.addSublayer(trackBg)
             trackLayers.append(trackBg)
 
-            // Clips
             for clip in track.clips {
                 let clipX = CGFloat(clip.startMs / 1000.0 * pps)
                 let clipW = max(2, CGFloat(clip.durationMs / 1000.0 * pps))
@@ -191,12 +218,11 @@ class TimelineContentView: NSView {
             }
         }
 
-        // Playhead spans all tracks
         let totalHeight = rulerHeight + CGFloat(tracks.count) * trackHeight
         playheadLayer.frame = CGRect(x: trackHeaderWidth, y: 0, width: 1.5, height: totalHeight)
-
-        // Drop indicator
         dropIndicatorLayer.frame = CGRect(x: 0, y: rulerHeight, width: 2, height: totalHeight - rulerHeight)
+
+        CATransaction.commit()
     }
 
     // MARK: - Update playhead position (lightweight — no re-layout)
@@ -204,8 +230,7 @@ class TimelineContentView: NSView {
     func updatePlayhead(ms: Double, pps: Double) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let x = trackHeaderWidth + CGFloat(ms / 1000.0 * pps)
-        playheadLayer.frame.origin.x = x
+        playheadLayer.frame.origin.x = trackHeaderWidth + CGFloat(ms / 1000.0 * pps)
         CATransaction.commit()
     }
 
@@ -218,15 +243,11 @@ class TimelineContentView: NSView {
 
         let color: NSColor
         switch clip.color {
-        case .video:
-            color = NSColor(red: 0.486, green: 0.424, blue: 0.980, alpha: 1)
-        case .audio:
-            color = NSColor(red: 0.3, green: 0.7, blue: 0.5, alpha: 1)
-        case .gap:
-            color = NSColor(red: 0.2, green: 0.2, blue: 0.2, alpha: 1)
+        case .video: color = NSColor(red: 0.486, green: 0.424, blue: 0.980, alpha: 1)
+        case .audio: color = NSColor(red: 0.3, green: 0.7, blue: 0.5, alpha: 1)
+        case .gap: color = NSColor(red: 0.2, green: 0.2, blue: 0.2, alpha: 1)
         }
 
-        // Gradient fill
         let gradientLayer = CAGradientLayer()
         gradientLayer.frame = clipLayer.bounds
         gradientLayer.cornerRadius = 4
@@ -238,13 +259,11 @@ class TimelineContentView: NSView {
         gradientLayer.endPoint = CGPoint(x: 0.5, y: 1)
         clipLayer.addSublayer(gradientLayer)
 
-        // Waveform
         if let samples = waveformData[clip.mediaFileId], !samples.isEmpty {
             let waveLayer = makeWaveformLayer(samples: samples, width: width, height: trackHeight - 4, color: color)
             clipLayer.addSublayer(waveLayer)
         }
 
-        // Name label
         if width > 50 {
             let textLayer = CATextLayer()
             textLayer.frame = CGRect(x: 6, y: 4, width: min(width - 12, 200), height: 16)
@@ -259,7 +278,6 @@ class TimelineContentView: NSView {
             clipLayer.addSublayer(textLayer)
         }
 
-        // Selection border
         if clip.isSelected {
             clipLayer.borderColor = NSColor.white.cgColor
             clipLayer.borderWidth = 1.5
@@ -268,9 +286,7 @@ class TimelineContentView: NSView {
             clipLayer.borderWidth = 0.5
         }
 
-        // Store clip ID for hit testing
         clipLayer.name = clip.id
-
         return clipLayer
     }
 
@@ -282,12 +298,23 @@ class TimelineContentView: NSView {
 
         let path = CGMutablePath()
         let midY = height / 2
-        let barWidth = max(0.5, width / CGFloat(samples.count))
+        // Downsample for rendering — max 1 bar per 2 pixels
+        let maxBars = Int(width / 2)
+        let stride = max(1, samples.count / max(1, maxBars))
+        let barWidth = max(0.5, width / CGFloat(samples.count / stride))
 
-        for (i, amplitude) in samples.enumerated() {
-            let x = CGFloat(i) * barWidth
-            let barH = CGFloat(amplitude) * height * 0.8
+        var barIndex = 0
+        var i = 0
+        while i < samples.count {
+            var maxAmp: Float = 0
+            for j in i..<min(i + stride, samples.count) {
+                if samples[j] > maxAmp { maxAmp = samples[j] }
+            }
+            let x = CGFloat(barIndex) * barWidth
+            let barH = CGFloat(maxAmp) * height * 0.8
             path.addRect(CGRect(x: x, y: midY - barH / 2, width: max(0.3, barWidth - 0.3), height: max(0.3, barH)))
+            barIndex += 1
+            i += stride
         }
 
         waveLayer.path = path
@@ -298,7 +325,6 @@ class TimelineContentView: NSView {
     // MARK: - Ruler
 
     private func rebuildRulerTicks(pps: Double, width: CGFloat) {
-        // Remove old tick sublayers
         rulerLayer.sublayers?.forEach { $0.removeFromSuperlayer() }
 
         let interval = rulerInterval(pps: pps)
@@ -350,14 +376,12 @@ class TimelineContentView: NSView {
             ? NSColor(red: 0.486, green: 0.424, blue: 0.980, alpha: 1)
             : NSColor(red: 0.3, green: 0.7, blue: 0.5, alpha: 1)
 
-        // Color indicator
         let indicator = CALayer()
         indicator.frame = CGRect(x: 0, y: 4, width: 3, height: trackHeight - 8)
         indicator.backgroundColor = color.cgColor
         indicator.cornerRadius = 1.5
         header.addSublayer(indicator)
 
-        // Track name
         let label = CATextLayer()
         label.frame = CGRect(x: 8, y: (trackHeight - 14) / 2, width: trackHeaderWidth - 12, height: 14)
         label.string = name
@@ -367,7 +391,6 @@ class TimelineContentView: NSView {
         label.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         header.addSublayer(label)
 
-        // Divider
         let divider = CALayer()
         divider.frame = CGRect(x: 0, y: trackHeight - 0.5, width: trackHeaderWidth, height: 0.5)
         divider.backgroundColor = NSColor(white: 0.2, alpha: 1).cgColor
@@ -379,9 +402,7 @@ class TimelineContentView: NSView {
     // MARK: - Content Size
 
     func totalContentWidth(tracks: [TimelineViewModel.TrackModel], pps: Double) -> CGFloat {
-        let maxMs = tracks.map { track in
-            track.clips.map { $0.startMs + $0.durationMs }.max() ?? 0
-        }.max() ?? 0
+        let maxMs = tracks.map { $0.clips.map { $0.startMs + $0.durationMs }.max() ?? 0 }.max() ?? 0
         return trackHeaderWidth + CGFloat(maxMs / 1000.0 * pps) + 200
     }
 
@@ -392,13 +413,11 @@ class TimelineContentView: NSView {
     // MARK: - Mouse Events
 
     override func mouseDown(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        coordinator?.handleMouseDown(at: location, event: event)
+        coordinator?.handleMouseDown(at: convert(event.locationInWindow, from: nil), event: event)
     }
 
     override func rightMouseDown(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        coordinator?.handleRightClick(at: location, event: event, view: self)
+        coordinator?.handleRightClick(at: convert(event.locationInWindow, from: nil), event: event, view: self)
     }
 
     // MARK: - Drag and Drop
@@ -409,10 +428,9 @@ class TimelineContentView: NSView {
     }
 
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        let location = convert(sender.draggingLocation, from: nil)
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        dropIndicatorLayer.frame.origin.x = location.x
+        dropIndicatorLayer.frame.origin.x = convert(sender.draggingLocation, from: nil).x
         dropIndicatorLayer.isHidden = false
         CATransaction.commit()
         return sender.draggingSourceOperationMask.contains(.generic) ? .move : .copy
@@ -424,8 +442,7 @@ class TimelineContentView: NSView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         dropIndicatorLayer.isHidden = true
-        let location = convert(sender.draggingLocation, from: nil)
-        return coordinator?.handleDrop(at: location, info: sender) ?? false
+        return coordinator?.handleDrop(at: convert(sender.draggingLocation, from: nil), info: sender) ?? false
     }
 }
 
@@ -438,9 +455,14 @@ class TimelineCoordinator: NSObject {
     var mediaFiles: [MediaFile]
     weak var container: TimelineScrollContainer?
 
+    // Dirty tracking — only rebuild when these change
+    var lastTrackCount: Int = -1
+    var lastTotalDurationMs: Double = -1
+    var lastPixelsPerSecond: Double = -1
+    var lastSelectedClipIds: Set<String> = []
+
     private var basePixelsPerSecond: Double = 100
-    private var displayLink: CVDisplayLink?
-    private var lastPlayheadMs: Double = -1
+    private var timeObserverCancellable: AnyCancellable?
 
     init(timelineVM: TimelineViewModel, playerVM: PlayerViewModel, mediaFiles: [MediaFile]) {
         self.timelineVM = timelineVM
@@ -452,27 +474,41 @@ class TimelineCoordinator: NSObject {
     func setup() {
         guard let container = container else { return }
         container.contentView.coordinator = self
-        syncFromViewModel()
+
+        // Subscribe to player time stream for lightweight playhead updates
+        // This bypasses SwiftUI's observable system entirely
+        timeObserverCancellable = playerVM.timeStream
+            .receive(on: RunLoop.main)
+            .sink { [weak self] ms in
+                self?.container?.contentView.updatePlayhead(
+                    ms: ms,
+                    pps: self?.timelineVM.pixelsPerSecond ?? 100
+                )
+            }
+
+        rebuildLayers()
     }
 
-    // MARK: - Sync from ViewModel
+    // MARK: - Rebuild (expensive — only when data changes)
 
-    func syncFromViewModel() {
+    func rebuildLayers() {
         guard let container = container else { return }
-        let cv = container.contentView
-
-        // Rebuild clip layers
-        cv.rebuildLayers(
+        container.contentView.rebuildLayers(
             tracks: timelineVM.tracks,
             pps: timelineVM.pixelsPerSecond,
             waveformData: timelineVM.waveformData
         )
-
-        // Update content size
         updateContentSize()
+        updatePlayheadOnly()
+    }
 
-        // Update playhead
-        cv.updatePlayhead(ms: playerVM.currentTimeMs, pps: timelineVM.pixelsPerSecond)
+    // MARK: - Playhead update (cheap — every frame)
+
+    func updatePlayheadOnly() {
+        container?.contentView.updatePlayhead(
+            ms: playerVM.currentTimeMs,
+            pps: timelineVM.pixelsPerSecond
+        )
     }
 
     func updateContentSize() {
@@ -480,7 +516,10 @@ class TimelineCoordinator: NSObject {
         let cv = container.contentView
         let width = cv.totalContentWidth(tracks: timelineVM.tracks, pps: timelineVM.pixelsPerSecond)
         let height = cv.totalContentHeight(trackCount: timelineVM.tracks.count)
-        cv.frame = NSRect(x: 0, y: 0, width: width, height: max(height, container.scrollView.frame.height))
+        let newFrame = NSRect(x: 0, y: 0, width: width, height: max(height, container.scrollView.frame.height))
+        if cv.frame != newFrame {
+            cv.frame = newFrame
+        }
     }
 
     // MARK: - Pinch-to-Zoom
@@ -492,7 +531,7 @@ class TimelineCoordinator: NSObject {
         case .changed:
             let newPps = basePixelsPerSecond * (1 + gesture.magnification)
             timelineVM.setZoom(newPps)
-            syncFromViewModel()
+            rebuildLayers()
         case .ended, .cancelled:
             basePixelsPerSecond = timelineVM.pixelsPerSecond
         default:
@@ -503,54 +542,41 @@ class TimelineCoordinator: NSObject {
     // MARK: - Click-to-Seek / Select
 
     func handleMouseDown(at location: CGPoint, event: NSEvent) {
-        guard let container = container else { return }
-        let cv = container.contentView
-
-        // Check if clicking in a track area
+        guard let cv = container?.contentView else { return }
         let trackIndex = Int((location.y - cv.rulerHeight) / cv.trackHeight)
 
         if location.x > cv.trackHeaderWidth {
             let clipX = location.x - cv.trackHeaderWidth
-
-            // Check for clip hit
             if let clip = timelineVM.clipAt(trackIndex: trackIndex, x: clipX) {
-                let exclusive = !event.modifierFlags.contains(.command)
-                timelineVM.selectClip(clip.id, exclusive: exclusive)
-                syncFromViewModel()
+                timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
+                rebuildLayers()
                 return
             }
-
-            // Click on empty area = seek
             let ms = timelineVM.xToMs(clipX)
             playerVM.seek(to: min(ms, timelineVM.totalDurationMs))
             timelineVM.clearSelection()
-            syncFromViewModel()
+            rebuildLayers()
         }
     }
 
     // MARK: - Right-Click Context Menu
 
     func handleRightClick(at location: CGPoint, event: NSEvent, view: NSView) {
-        guard let container = container else { return }
-        let cv = container.contentView
+        guard let cv = container?.contentView else { return }
         let trackIndex = Int((location.y - cv.rulerHeight) / cv.trackHeight)
         let clipX = location.x - cv.trackHeaderWidth
 
-        // Select the clip under cursor if not already selected
-        if let clip = timelineVM.clipAt(trackIndex: trackIndex, x: clipX) {
-            if !timelineVM.selectedClipIds.contains(clip.id) {
-                timelineVM.selectClip(clip.id, exclusive: true)
-                syncFromViewModel()
-            }
+        if let clip = timelineVM.clipAt(trackIndex: trackIndex, x: clipX),
+           !timelineVM.selectedClipIds.contains(clip.id) {
+            timelineVM.selectClip(clip.id, exclusive: true)
+            rebuildLayers()
         }
 
-        let menu = buildContextMenu(hasSelection: !timelineVM.selectedClipIds.isEmpty)
-        NSMenu.popUpContextMenu(menu, with: event, for: view)
+        NSMenu.popUpContextMenu(buildContextMenu(hasSelection: !timelineVM.selectedClipIds.isEmpty), with: event, for: view)
     }
 
     private func buildContextMenu(hasSelection: Bool) -> NSMenu {
         let menu = NSMenu()
-
         if hasSelection {
             menu.addItem(withTitle: "Cut", action: #selector(cutAction), keyEquivalent: "x").target = self
             menu.addItem(withTitle: "Copy", action: #selector(copyAction), keyEquivalent: "c").target = self
@@ -562,45 +588,34 @@ class TimelineCoordinator: NSObject {
         } else {
             menu.addItem(withTitle: "Paste", action: #selector(pasteAction), keyEquivalent: "v").target = self
         }
-
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Add Video Track", action: #selector(addVideoTrack), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Add Audio Track", action: #selector(addAudioTrack), keyEquivalent: "").target = self
-
         return menu
     }
 
-    @objc func cutAction() { timelineVM.cutSelected(); syncFromViewModel() }
+    @objc func cutAction() { timelineVM.cutSelected(); rebuildLayers() }
     @objc func copyAction() { timelineVM.copySelected() }
-    @objc func pasteAction() { timelineVM.pasteAtPlayhead(); syncFromViewModel() }
-    @objc func deleteAction() { timelineVM.deleteSelected(); syncFromViewModel() }
-    @objc func linkAction() { timelineVM.linkSelected(); syncFromViewModel() }
-    @objc func unlinkAction() { timelineVM.unlinkSelected(); syncFromViewModel() }
-    @objc func addVideoTrack() { timelineVM.addTrack(kind: .video); syncFromViewModel() }
-    @objc func addAudioTrack() { timelineVM.addTrack(kind: .audio); syncFromViewModel() }
+    @objc func pasteAction() { timelineVM.pasteAtPlayhead(); rebuildLayers() }
+    @objc func deleteAction() { timelineVM.deleteSelected(); rebuildLayers() }
+    @objc func linkAction() { timelineVM.linkSelected(); rebuildLayers() }
+    @objc func unlinkAction() { timelineVM.unlinkSelected(); rebuildLayers() }
+    @objc func addVideoTrack() { timelineVM.addTrack(kind: .video); rebuildLayers() }
+    @objc func addAudioTrack() { timelineVM.addTrack(kind: .audio); rebuildLayers() }
 
     // MARK: - Drop Handler
 
     func handleDrop(at location: CGPoint, info: NSDraggingInfo) -> Bool {
-        guard let container = container else { return false }
-        let cv = container.contentView
-
+        guard let cv = container?.contentView else { return false }
         guard let pasteboard = info.draggingPasteboard.data(forType: .init("com.abscido.mediafile")),
-              let file = try? JSONDecoder().decode(MediaFile.self, from: pasteboard) else {
-            return false
-        }
+              let file = try? JSONDecoder().decode(MediaFile.self, from: pasteboard) else { return false }
 
-        let clipX = location.x - cv.trackHeaderWidth
-        let timeMs = timelineVM.xToMs(clipX)
-        let isOverwrite = NSEvent.modifierFlags.contains(.option)
-
-        if isOverwrite {
+        let timeMs = timelineVM.xToMs(location.x - cv.trackHeaderWidth)
+        if NSEvent.modifierFlags.contains(.option) {
             timelineVM.overwriteMedia(file, atTimeMs: timeMs, allMediaFiles: mediaFiles)
         } else {
             timelineVM.insertMedia(file, atTimeMs: timeMs, allMediaFiles: mediaFiles)
         }
-
-        // Sync will happen via updateNSView when VM updates
         return true
     }
 }
