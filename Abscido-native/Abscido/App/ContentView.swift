@@ -32,7 +32,12 @@ struct ContentView: View {
             return .handled
         }
         .onKeyPress(.delete) {
-            handleDelete()
+            // Delete selected timeline clips, or fall back to transcript word deletion
+            if !coord.timelineVM.selectedClipIds.isEmpty {
+                coord.timelineVM.deleteSelected()
+            } else {
+                handleDelete()
+            }
             return .handled
         }
         .onKeyPress(.leftArrow) {

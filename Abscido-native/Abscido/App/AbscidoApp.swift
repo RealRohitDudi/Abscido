@@ -43,6 +43,40 @@ struct AbscidoApp: App {
                     coordinator.selectAllWords()
                 }
                 .keyboardShortcut("a")
+
+                Divider()
+
+                Button("Cut Clips") {
+                    coordinator.timelineVM.cutSelected()
+                }
+                .keyboardShortcut("x")
+
+                Button("Copy Clips") {
+                    coordinator.timelineVM.copySelected()
+                }
+                .keyboardShortcut("c")
+
+                Button("Paste Clips") {
+                    coordinator.timelineVM.pasteAtPlayhead()
+                }
+                .keyboardShortcut("v")
+
+                Button("Delete Clips") {
+                    coordinator.timelineVM.deleteSelected()
+                }
+                .keyboardShortcut(.delete, modifiers: [])
+
+                Divider()
+
+                Button("Link Clips") {
+                    coordinator.timelineVM.linkSelected()
+                }
+                .keyboardShortcut("l")
+
+                Button("Unlink Clips") {
+                    coordinator.timelineVM.unlinkSelected()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
             }
 
             // MARK: - Export Menu

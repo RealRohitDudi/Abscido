@@ -47,6 +47,7 @@ struct OTIOClip: Codable, Equatable, Sendable {
     var mediaReference: OTIOMediaReference
     var sourceRange: OTIOTimeRange
     var mediaFileId: Int64
+    var linkGroupId: String?
 }
 
 struct OTIOGap: Codable, Equatable, Sendable {
