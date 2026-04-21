@@ -1,6 +1,17 @@
 import Foundation
+import UniformTypeIdentifiers
+import CoreTransferable
 
-struct MediaFile: Identifiable, Codable, Equatable, Sendable {
+// Custom UTType for MediaFile drag payloads
+extension UTType {
+    static let abscidoMediaFile = UTType(exportedAs: "com.abscido.mediafile")
+}
+
+struct MediaFile: Identifiable, Codable, Equatable, Sendable, Transferable {
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .abscidoMediaFile)
+    }
+
     var id: Int64
     var projectId: Int64
     var filePath: String

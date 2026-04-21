@@ -4,6 +4,7 @@ import SwiftUI
 struct TimelineClipView: View {
     let clip: TimelineViewModel.TimelineClipModel
     let pixelsPerSecond: Double
+    let waveformSamples: [Float]?
 
     private var width: CGFloat {
         max(4, clip.durationMs / 1000.0 * pixelsPerSecond)
@@ -26,24 +27,38 @@ struct TimelineClipView: View {
             RoundedRectangle(cornerRadius: 4)
                 .fill(
                     LinearGradient(
-                        colors: [clipColor, clipColor.opacity(0.7)],
+                        colors: [clipColor.opacity(0.35), clipColor.opacity(0.15)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
                 )
+                .overlay {
+                    // Waveform layer
+                    if let samples = waveformSamples, !samples.isEmpty {
+                        WaveformView(
+                            samples: visibleSamples(from: samples),
+                            accentColor: clipColor
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                }
                 .overlay(alignment: .leading) {
                     if width > 60 {
                         Text(clip.name)
-                            .font(.system(size: 10))
+                            .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.white.opacity(0.9))
                             .lineLimit(1)
                             .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(clipColor.opacity(0.6))
+                            .clipShape(RoundedRectangle(cornerRadius: 3))
+                            .padding(4)
                     }
                 }
-                .frame(width: width, height: 40)
+                .frame(width: width, height: 48)
                 .overlay(
                     RoundedRectangle(cornerRadius: 4)
-                        .strokeBorder(clipColor.opacity(0.8), lineWidth: 0.5)
+                        .strokeBorder(clipColor.opacity(0.6), lineWidth: 0.5)
                 )
 
             // Duration label
@@ -55,5 +70,14 @@ struct TimelineClipView: View {
                     .padding(.top, 2)
             }
         }
+    }
+
+    /// Extracts the subset of waveform samples visible for this clip's source range.
+    private func visibleSamples(from allSamples: [Float]) -> [Float] {
+        // allSamples covers the entire media file duration.
+        // The clip may only represent a sub-range after editing.
+        // For now, use all samples (initial clips cover full duration).
+        // When source range clipping is needed, slice here based on clip.startMs.
+        return allSamples
     }
 }

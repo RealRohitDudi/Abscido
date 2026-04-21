@@ -1,9 +1,19 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Horizontal scrolling timeline view backed by OTIO timeline data.
+/// Supports drag-and-drop from Media Bin, pinch-to-zoom, and waveform visualization.
 struct TimelineView: View {
     @Bindable var timelineVM: TimelineViewModel
     @Bindable var playerVM: PlayerViewModel
+    var mediaFiles: [MediaFile]
+
+    /// Base zoom level stored at gesture start for smooth pinch-to-zoom.
+    @State private var basePixelsPerSecond: Double = 100.0
+    /// Tracks whether a drag is currently hovering over the timeline.
+    @State private var isDragHovering = false
+    /// The x-position of the current drag hover for the drop indicator.
+    @State private var dragHoverX: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -45,56 +55,111 @@ struct TimelineView: View {
             if timelineVM.clips.isEmpty {
                 emptyTimeline
             } else {
-                ScrollView(.horizontal, showsIndicators: true) {
-                    ZStack(alignment: .topLeading) {
-                        // Ruler
-                        timelineRuler
-
-                        // Clips
-                        HStack(spacing: 1) {
-                            ForEach(timelineVM.clips) { clip in
-                                TimelineClipView(
-                                    clip: clip,
-                                    pixelsPerSecond: timelineVM.pixelsPerSecond
-                                )
-                            }
-                        }
-                        .padding(.top, 24)
-
-                        // Playhead
-                        PlayheadView(
-                            timeMs: playerVM.currentTimeMs,
-                            pixelsPerSecond: timelineVM.pixelsPerSecond,
-                            height: 120
-                        )
-                    }
-                    .frame(
-                        width: max(300, timelineVM.totalDurationMs / 1000.0 * timelineVM.pixelsPerSecond),
-                        alignment: .leading
-                    )
-                }
-                .background(Color(red: 0.102, green: 0.102, blue: 0.102))
-                .contentShape(Rectangle())
-                .onTapGesture { location in
-                    let ms = (location.x / timelineVM.pixelsPerSecond) * 1000.0
-                    playerVM.seek(to: max(0, min(ms, timelineVM.totalDurationMs)))
-                }
+                timelineContent
             }
         }
+        .gesture(
+            MagnifyGesture()
+                .onChanged { value in
+                    let newPps = basePixelsPerSecond * value.magnification
+                    timelineVM.setZoom(newPps)
+                }
+                .onEnded { _ in
+                    basePixelsPerSecond = timelineVM.pixelsPerSecond
+                }
+        )
+        .onAppear {
+            basePixelsPerSecond = timelineVM.pixelsPerSecond
+        }
     }
+
+    // MARK: - Timeline Content
+
+    private var timelineContent: some View {
+        ScrollView(.horizontal, showsIndicators: true) {
+            ZStack(alignment: .topLeading) {
+                // Ruler
+                timelineRuler
+
+                // Clips
+                HStack(spacing: 1) {
+                    ForEach(timelineVM.clips) { clip in
+                        TimelineClipView(
+                            clip: clip,
+                            pixelsPerSecond: timelineVM.pixelsPerSecond,
+                            waveformSamples: timelineVM.waveformSamples(for: clip)
+                        )
+                    }
+                }
+                .padding(.top, 24)
+
+                // Playhead
+                PlayheadView(
+                    timeMs: playerVM.currentTimeMs,
+                    pixelsPerSecond: timelineVM.pixelsPerSecond,
+                    height: 120
+                )
+
+                // Drop indicator
+                if isDragHovering {
+                    dropIndicator
+                }
+            }
+            .frame(
+                width: max(300, timelineVM.totalDurationMs / 1000.0 * timelineVM.pixelsPerSecond),
+                alignment: .leading
+            )
+        }
+        .background(Color(red: 0.102, green: 0.102, blue: 0.102))
+        .contentShape(Rectangle())
+        .onTapGesture { location in
+            let ms = (location.x / timelineVM.pixelsPerSecond) * 1000.0
+            playerVM.seek(to: max(0, min(ms, timelineVM.totalDurationMs)))
+        }
+        .dropDestination(for: MediaFile.self) { droppedFiles, location in
+            guard let file = droppedFiles.first else { return false }
+            let insertIndex = timelineVM.insertionIndex(forDropX: location.x)
+            timelineVM.insertMediaFile(file, at: insertIndex, allMediaFiles: mediaFiles)
+            isDragHovering = false
+            return true
+        } isTargeted: { isTargeted in
+            isDragHovering = isTargeted
+        }
+    }
+
+    // MARK: - Drop Indicator
+
+    private var dropIndicator: some View {
+        Rectangle()
+            .fill(Color(red: 0.486, green: 0.424, blue: 0.980))
+            .frame(width: 2, height: 80)
+            .shadow(color: Color(red: 0.486, green: 0.424, blue: 0.980).opacity(0.6), radius: 4)
+            .padding(.top, 24)
+    }
+
+    // MARK: - Empty State
 
     private var emptyTimeline: some View {
         VStack(spacing: 8) {
             Image(systemName: "timeline.selection")
                 .font(.title2)
                 .foregroundColor(.secondary.opacity(0.4))
-            Text("Import media to see timeline")
+            Text("Drop media here or import to see timeline")
                 .font(.caption)
                 .foregroundColor(.secondary.opacity(0.6))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(red: 0.102, green: 0.102, blue: 0.102))
+        .dropDestination(for: MediaFile.self) { droppedFiles, _ in
+            guard let file = droppedFiles.first else { return false }
+            timelineVM.insertMediaFile(file, at: 0, allMediaFiles: mediaFiles)
+            return true
+        } isTargeted: { isTargeted in
+            isDragHovering = isTargeted
+        }
     }
+
+    // MARK: - Ruler
 
     private var timelineRuler: some View {
         Canvas { context, size in

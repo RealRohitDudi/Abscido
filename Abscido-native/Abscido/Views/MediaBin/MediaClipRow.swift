@@ -58,5 +58,6 @@ struct MediaClipRow: View {
             Spacer()
         }
         .padding(.vertical, 4)
+        .draggable(file)
     }
 }

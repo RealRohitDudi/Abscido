@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// Root workspace layout — NavigationSplitView with 3 columns:
-/// Sidebar: MediaBin | Content: Player + Transcript | Detail: Timeline + Export
+/// Sidebar: MediaBin | Content: Player + TranscribeBar + Timeline | Detail: Transcript
 struct WorkspaceView: View {
     @State var projectVM: ProjectViewModel
     @State var transcriptVM: TranscriptViewModel
@@ -10,8 +10,6 @@ struct WorkspaceView: View {
     @State var aiVM: AIViewModel
 
     @State private var selectedMediaFileId: Int64?
-    @State private var showExportSheet = false
-    @State private var showXmlExportSheet = false
     @State private var columnVisibility = NavigationSplitViewVisibility.all
 
     var body: some View {
@@ -24,7 +22,7 @@ struct WorkspaceView: View {
             )
             .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         } content: {
-            // MARK: - Content: Player + Transcript
+            // MARK: - Content: Player + TranscribeBar + Timeline
             VSplitView {
                 VStack(spacing: 0) {
                     PlayerView(player: playerVM.player)
@@ -33,44 +31,32 @@ struct WorkspaceView: View {
                     PlayerControlsView(playerVM: playerVM)
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
-                }
-                .frame(minHeight: 280)
 
-                VStack(spacing: 0) {
+                    // Transcribe buttons bar — stays below player controls
                     TranscriptToolbarView(
                         transcriptVM: transcriptVM,
                         aiVM: aiVM,
                         selectedMediaFile: selectedMediaFile,
                         onTranscribe: handleTranscribe
                     )
-
-                    TranscriptEditorView(
-                        transcriptVM: transcriptVM,
-                        playerVM: playerVM,
-                        onDeleteWords: handleDeleteWords
-                    )
                 }
-                .frame(minHeight: 200)
-            }
-        } detail: {
-            // MARK: - Detail: Timeline + Export
-            VStack(spacing: 0) {
+                .frame(minHeight: 280)
+
+                // Timeline — moved here from detail column
                 TimelineView(
                     timelineVM: timelineVM,
-                    playerVM: playerVM
+                    playerVM: playerVM,
+                    mediaFiles: projectVM.mediaFiles
                 )
                 .frame(minHeight: 150)
-
-                Divider()
-
-                ExportSheetView(
-                    projectVM: projectVM,
-                    transcriptVM: transcriptVM,
-                    timelineVM: timelineVM
-                )
-                .frame(minHeight: 100)
-                .padding()
             }
+        } detail: {
+            // MARK: - Detail: Transcript Editor
+            TranscriptEditorView(
+                transcriptVM: transcriptVM,
+                playerVM: playerVM,
+                onDeleteWords: handleDeleteWords
+            )
             .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 400)
         }
         .background(Color(red: 0.059, green: 0.059, blue: 0.059)) // #0f0f0f

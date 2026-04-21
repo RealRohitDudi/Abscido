@@ -117,6 +117,11 @@ actor OTIOEngine {
         return json
     }
 
+    /// Sets the timeline state directly (used after drag-and-drop insertion).
+    func setTimeline(_ tl: OTIOTimeline) {
+        self.timeline = tl
+    }
+
     /// Resets the timeline state.
     func reset() {
         timeline = nil
