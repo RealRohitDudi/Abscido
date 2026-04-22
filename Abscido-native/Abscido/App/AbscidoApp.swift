@@ -9,7 +9,7 @@ struct AbscidoApp: App {
         WindowGroup {
             ContentView()
                 .environment(coordinator)
-                .frame(minWidth: 1200, minHeight: 800)
+                .frame(minWidth: 800, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
                 .onAppear {
                     setDarkAppearance()
                 }

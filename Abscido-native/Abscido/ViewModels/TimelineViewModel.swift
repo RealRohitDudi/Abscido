@@ -44,6 +44,9 @@ final class TimelineViewModel {
     /// Selected clip identifiers.
     var selectedClipIds: Set<String> = []
 
+    /// Individual track heights (keyed by trackIndex). Default is 52.
+    var trackHeights: [Int: CGFloat] = [:]
+
     /// Waveform amplitude data keyed by media file ID.
     var waveformData: [Int64: [Float]] = [:]
 
@@ -316,7 +319,7 @@ final class TimelineViewModel {
 
     /// Exports the OTIO timeline as JSON.
     func exportOTIOJSON() async throws -> String {
-        try await otioEngine.exportOTIOJSON()
+        try await otioEngine.exportOTIO()
     }
 
     // MARK: - Refresh

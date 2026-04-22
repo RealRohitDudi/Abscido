@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Single row in the media bin showing thumbnail, filename, duration, and resolution.
 struct MediaClipRow: View {
@@ -58,6 +59,18 @@ struct MediaClipRow: View {
             Spacer()
         }
         .padding(.vertical, 4)
-        .draggable(file)
+        .onDrag {
+            let provider = NSItemProvider()
+            if let data = try? JSONEncoder().encode(file) {
+                provider.registerDataRepresentation(
+                    forTypeIdentifier: UTType.abscidoMediaFile.identifier,
+                    visibility: .all
+                ) { completion in
+                    completion(data, nil)
+                    return nil
+                }
+            }
+            return provider
+        }
     }
 }

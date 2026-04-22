@@ -1,8 +1,10 @@
 import Foundation
+import OpenTimelineIO
 
 /// OTIOEngine manages the timeline data model using OTIO-compatible structures.
 /// It is the source of truth for the editorial timeline state.
 /// Supports multi-track editing, linked clips, insert/overwrite, trim, copy/paste.
+/// Uses the real OpenTimelineIO library for serialization and interchange.
 actor OTIOEngine {
     private var timeline: OTIOTimeline?
     private var clipboard: [ClipboardEntry] = []
@@ -445,9 +447,24 @@ actor OTIOEngine {
         clipboard = []
     }
 
-    // MARK: - Export
+    // MARK: - OTIO Serialization (real OpenTimelineIO)
 
-    func exportOTIOJSON() throws -> String {
+    /// Exports the timeline as a real .otio JSON string using OpenTimelineIO.
+    func exportOTIO() throws -> String {
+        guard let tl = timeline else {
+            throw AbscidoError.exportFailed(reason: "No timeline to export")
+        }
+
+        // Convert bridge model → real OTIO Timeline
+        let otioTimeline = tl.toOTIOTimeline()
+
+        // Serialize to .otio JSON
+        let jsonString = try otioTimeline.toJSON()
+        return jsonString
+    }
+
+    /// Exports the timeline as our internal bridge JSON format.
+    func exportBridgeJSON() throws -> String {
         guard let tl = timeline else {
             throw AbscidoError.exportFailed(reason: "No timeline to export")
         }
@@ -459,4 +476,19 @@ actor OTIOEngine {
         }
         return json
     }
+
+    /// Imports a timeline from a .otio JSON file using the real OpenTimelineIO parser.
+    func importOTIO(from url: URL) throws {
+        let otioTimeline = try OpenTimelineIO.Timeline.fromJSON(url: url) as! OpenTimelineIO.Timeline
+        let bridgeTimeline = OTIOTimeline.from(otioTimeline)
+        self.timeline = bridgeTimeline
+    }
+
+    /// Saves the current timeline to a .otio file.
+    func saveOTIO(to url: URL) throws {
+        let json = try exportOTIO()
+        try json.write(to: url, atomically: true, encoding: .utf8)
+    }
 }
+
+

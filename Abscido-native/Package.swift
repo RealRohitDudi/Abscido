@@ -8,14 +8,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/stephencelis/SQLite.swift", from: "0.15.0"),
-        // OpenTimelineIO Swift bindings — add when available for your build environment:
-        // .package(url: "https://github.com/OpenTimelineIO/OpenTimelineIO-Swift-Bindings", from: "0.17.0"),
+        .package(url: "https://github.com/OpenTimelineIO/OpenTimelineIO-Swift-Bindings.git", branch: "main"),
     ],
     targets: [
         .executableTarget(
             name: "Abscido",
             dependencies: [
                 .product(name: "SQLite", package: "SQLite.swift"),
+                .product(name: "OpenTimelineIO", package: "OpenTimelineIO-Swift-Bindings"),
             ],
             path: "Abscido",
             exclude: [
@@ -25,5 +25,6 @@ let package = Package(
                 .copy("Resources/scripts"),
             ]
         )
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )
