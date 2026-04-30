@@ -50,6 +50,10 @@ final class TimelineViewModel {
     /// Waveform amplitude data keyed by media file ID.
     var waveformData: [Int64: [Float]] = [:]
 
+    /// Monotonically increasing token used by AppKit timeline renderer to know
+    /// when async waveform generation finished (so it can rebuild layers).
+    var waveformRevision: Int = 0
+
     /// Callback to notify parent when timeline changes require composition rebuild.
     var onTimelineChanged: (() -> Void)?
 
@@ -83,24 +87,38 @@ final class TimelineViewModel {
 
     func insertMedia(_ file: MediaFile, atTimeMs timeMs: Double, allMediaFiles: [MediaFile]) {
         Task {
-            // Ensure timeline exists
             if await otioEngine.currentTimeline() == nil {
                 _ = await otioEngine.buildTimeline(from: allMediaFiles)
             }
 
             guard let tl = await otioEngine.currentTimeline() else { return }
 
-            // Find V and A track indices
             let vIndex = tl.tracks.firstIndex(where: { $0.kind == .video }) ?? 0
             let aIndex = tl.tracks.firstIndex(where: { $0.kind == .audio }) ?? 1
+
+            insertMediaOnTracks(file, atTimeMs: timeMs, allMediaFiles: allMediaFiles, videoTrackIndex: vIndex, audioTrackIndex: aIndex)
+        }
+    }
+
+    func insertMediaOnTracks(
+        _ file: MediaFile,
+        atTimeMs timeMs: Double,
+        allMediaFiles: [MediaFile],
+        videoTrackIndex: Int,
+        audioTrackIndex: Int
+    ) {
+        Task {
+            // Ensure timeline exists
+            if await otioEngine.currentTimeline() == nil {
+                _ = await otioEngine.buildTimeline(from: allMediaFiles)
+            }
 
             await otioEngine.insertMedia(
                 file: file,
                 atTimeMs: timeMs,
-                videoTrackIndex: vIndex,
-                audioTrackIndex: aIndex
+                videoTrackIndex: videoTrackIndex,
+                audioTrackIndex: audioTrackIndex
             )
-
             await refreshFromEngine()
             await generateWaveforms(for: [file])
         }
@@ -117,13 +135,28 @@ final class TimelineViewModel {
             let vIndex = tl.tracks.firstIndex(where: { $0.kind == .video }) ?? 0
             let aIndex = tl.tracks.firstIndex(where: { $0.kind == .audio }) ?? 1
 
+            overwriteMediaOnTracks(file, atTimeMs: timeMs, allMediaFiles: allMediaFiles, videoTrackIndex: vIndex, audioTrackIndex: aIndex)
+        }
+    }
+
+    func overwriteMediaOnTracks(
+        _ file: MediaFile,
+        atTimeMs timeMs: Double,
+        allMediaFiles: [MediaFile],
+        videoTrackIndex: Int,
+        audioTrackIndex: Int
+    ) {
+        Task {
+            if await otioEngine.currentTimeline() == nil {
+                _ = await otioEngine.buildTimeline(from: allMediaFiles)
+            }
+
             await otioEngine.overwriteMedia(
                 file: file,
                 atTimeMs: timeMs,
-                videoTrackIndex: vIndex,
-                audioTrackIndex: aIndex
+                videoTrackIndex: videoTrackIndex,
+                audioTrackIndex: audioTrackIndex
             )
-
             await refreshFromEngine()
             await generateWaveforms(for: [file])
         }
@@ -151,6 +184,11 @@ final class TimelineViewModel {
 
     func clearSelection() {
         selectedClipIds.removeAll()
+        updateSelectionState()
+    }
+
+    func setSelection(_ ids: Set<String>) {
+        selectedClipIds = ids
         updateSelectionState()
     }
 
@@ -289,6 +327,7 @@ final class TimelineViewModel {
         for file in mediaFiles {
             let samples = await waveformGenerator.generateWaveform(for: file)
             waveformData[file.id] = samples
+            waveformRevision &+= 1
         }
     }
 

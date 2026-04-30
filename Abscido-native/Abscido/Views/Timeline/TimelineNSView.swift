@@ -5,6 +5,16 @@ import UniformTypeIdentifiers
 
 // MARK: - NSViewRepresentable Wrapper
 
+// MARK: - ScrollView subclass (reliable trackpad magnify routing)
+
+final class TimelineScrollView: NSScrollView {
+    weak var coordinator: TimelineCoordinator?
+    override var acceptsFirstResponder: Bool { true }
+    // NOTE: magnify handling intentionally NOT overridden here.
+    // We use a single window-level NSEvent monitor in TimelineCoordinator.setup()
+    // so we never double-handle pinch (which caused intermittent zoom).
+}
+
 /// High-performance multi-track timeline using NSScrollView + CALayer.
 /// Replaces SwiftUI ScrollView for smooth 60fps scrolling and native pinch-to-zoom.
 struct TimelineNSView: NSViewRepresentable {
@@ -17,6 +27,7 @@ struct TimelineNSView: NSViewRepresentable {
     var totalDurationMs: Double
     var pixelsPerSecond: Double
     var selectedClipIds: Set<String>
+    var waveformRevision: Int
 
     init(timelineVM: TimelineViewModel, playerVM: PlayerViewModel, mediaFiles: [MediaFile]) {
         self.timelineVM = timelineVM
@@ -26,6 +37,7 @@ struct TimelineNSView: NSViewRepresentable {
         self.totalDurationMs = timelineVM.totalDurationMs
         self.pixelsPerSecond = timelineVM.pixelsPerSecond
         self.selectedClipIds = timelineVM.selectedClipIds
+        self.waveformRevision = timelineVM.waveformRevision
     }
 
     func makeNSView(context: Context) -> TimelineScrollContainer {
@@ -39,17 +51,22 @@ struct TimelineNSView: NSViewRepresentable {
     func updateNSView(_ nsView: TimelineScrollContainer, context: Context) {
         let coord = context.coordinator
 
+        // Keep mediaFiles fresh so drop handler finds newly-added files
+        coord.mediaFiles = mediaFiles
+
         // Only rebuild layers if timeline structure or zoom changed
         let needsRebuild = coord.lastTrackCount != trackCount
             || coord.lastTotalDurationMs != totalDurationMs
             || coord.lastPixelsPerSecond != pixelsPerSecond
             || coord.lastSelectedClipIds != selectedClipIds
+            || coord.lastWaveformRevision != waveformRevision
 
         if needsRebuild {
             coord.lastTrackCount = trackCount
             coord.lastTotalDurationMs = totalDurationMs
             coord.lastPixelsPerSecond = pixelsPerSecond
             coord.lastSelectedClipIds = selectedClipIds
+            coord.lastWaveformRevision = waveformRevision
             coord.rebuildLayers()
         }
 
@@ -67,7 +84,7 @@ struct TimelineNSView: NSViewRepresentable {
 /// Hosts the NSScrollView and handles pinch-to-zoom.
 class TimelineScrollContainer: NSView {
     var coordinator: TimelineCoordinator?
-    let scrollView = NSScrollView()
+    let scrollView = TimelineScrollView()
     let contentView = TimelineContentView()
 
     override init(frame: NSRect) {
@@ -89,6 +106,9 @@ class TimelineScrollContainer: NSView {
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
         scrollView.usesPredominantAxisScrolling = false
+        // Disable NSScrollView's built-in magnification so it can't fight our zoom.
+        // We listen for trackpad pinch ourselves via a window-level NSEvent monitor.
+        scrollView.allowsMagnification = false
 
         let clipView = NSClipView()
         clipView.drawsBackground = true
@@ -105,24 +125,27 @@ class TimelineScrollContainer: NSView {
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        // Magnification gesture — on the container, not the scroll view
-        let magnifyGesture = NSMagnificationGestureRecognizer(target: self, action: #selector(handleMagnify(_:)))
-        addGestureRecognizer(magnifyGesture)
-
-        // Register for drag-and-drop
+        // Register for ALL URL pasteboard types — SwiftUI .onDrag, Finder, and .draggable all use different types
         contentView.registerForDraggedTypes([
-            .init(UTType.abscidoMediaFile.identifier),
-            .fileURL
+            .fileURL,
+            .URL,
+            NSPasteboard.PasteboardType("public.file-url"),
+            NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url"),
+            NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-content-url"),
+            NSPasteboard.PasteboardType("NSFilenamesPboardType"),
         ])
     }
 
-    @objc private func handleMagnify(_ gesture: NSMagnificationGestureRecognizer) {
-        coordinator?.handleMagnify(gesture)
-    }
+    override var acceptsFirstResponder: Bool { true }
 
     override func layout() {
         super.layout()
         coordinator?.updateContentSize()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Nothing else needed; scroll view routes pinch to magnify(with:).
     }
 }
 
@@ -142,6 +165,7 @@ class TimelineContentView: NSView {
     private var headerLayers: [CALayer] = []
     private var dropIndicatorLayer = CALayer()
     private var rulerCornerLayer = CALayer()
+    private var marqueeLayer = CAShapeLayer()
 
     override var isFlipped: Bool { return true }
     override var acceptsFirstResponder: Bool { return true }
@@ -157,6 +181,11 @@ class TimelineContentView: NSView {
         super.init(coder: coder)
         wantsLayer = true
         setupBaseLayers()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.acceptsMouseMovedEvents = true
     }
 
     private var playheadLineLayer = CALayer()
@@ -191,6 +220,28 @@ class TimelineContentView: NSView {
         rulerCornerLayer.backgroundColor = NSColor(red: 0.11, green: 0.11, blue: 0.11, alpha: 1).cgColor
         rulerCornerLayer.zPosition = 200
         rootLayer.addSublayer(rulerCornerLayer)
+
+        marqueeLayer.fillColor = NSColor(red: 0.486, green: 0.424, blue: 0.980, alpha: 0.15).cgColor
+        marqueeLayer.strokeColor = NSColor(red: 0.486, green: 0.424, blue: 0.980, alpha: 0.7).cgColor
+        marqueeLayer.lineWidth = 1
+        marqueeLayer.isHidden = true
+        marqueeLayer.zPosition = 250
+        rootLayer.addSublayer(marqueeLayer)
+    }
+
+    func showMarquee(_ rect: CGRect?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let rect {
+            let path = CGMutablePath()
+            path.addRect(rect)
+            marqueeLayer.path = path
+            marqueeLayer.isHidden = false
+        } else {
+            marqueeLayer.path = nil
+            marqueeLayer.isHidden = true
+        }
+        CATransaction.commit()
     }
 
     // MARK: - Rebuild all clip layers
@@ -472,45 +523,58 @@ class TimelineContentView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let ta = trackingArea { removeTrackingArea(ta) }
+        // Use .activeAlways so cursor events fire even when window is not key
+        // (important: NSScrollView creates its own tracking and can starve .activeInKeyWindow)
         trackingArea = NSTrackingArea(
             rect: bounds,
-            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeInKeyWindow, .inVisibleRect],
+            options: [.mouseMoved, .mouseEnteredAndExited, .cursorUpdate, .activeAlways, .inVisibleRect],
             owner: self,
             userInfo: nil
         )
         if let ta = trackingArea { addTrackingArea(ta) }
     }
 
-    /// Called by AppKit's cursor-rect system — the reliable way to set cursors.
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        guard let coordinator = coordinator else { return }
-        var currentY = rulerHeight
-        for track in coordinator.timelineVM.tracks {
-            let tHeight = coordinator.timelineVM.trackHeights[track.trackIndex] ?? trackHeight
-            currentY += tHeight
-            // 8-pt hit zone at the track boundary — full width of header area
-            let resizeRect = CGRect(x: 0, y: currentY - 4, width: trackHeaderWidth, height: 8)
-            addCursorRect(resizeRect, cursor: .resizeUpDown)
+    /// resetCursorRects is NOT reliable inside NSScrollView.
+    /// Cursor is handled entirely via mouseMoved + push/pop.
+    override func resetCursorRects() { }
+
+    // MARK: - Cursor (push/pop — only reliable method inside NSScrollView)
+    var currentCursorPushed: NSCursor? = nil
+
+    func applyCursor(_ cursor: NSCursor) {
+        // During an active resize drag, don't let mouse movement override the locked cursor
+        if coordinator?.resizingTrackIndex != nil {
+            if cursor == .resizeUpDown && currentCursorPushed == nil {
+                cursor.push()
+                currentCursorPushed = cursor
+            }
+            return
+        }
+        guard currentCursorPushed != cursor else { return }  // already correct
+        if currentCursorPushed != nil {
+            NSCursor.pop()
+            currentCursorPushed = nil
+        }
+        if cursor != .arrow {
+            cursor.push()
+            currentCursorPushed = cursor
         }
     }
 
     override func cursorUpdate(with event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
-        coordinator?.cursorForLocation(loc).set()
+        applyCursor(coordinator?.cursorForLocation(loc) ?? .arrow)
     }
 
     override func mouseMoved(with event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
-        coordinator?.cursorForLocation(loc).set()
+        applyCursor(coordinator?.cursorForLocation(loc) ?? .arrow)
     }
 
     override func mouseExited(with event: NSEvent) {
-        NSCursor.arrow.set()
-    }
-
-    override func magnify(with event: NSEvent) {
-        coordinator?.handleMagnifyEvent(event)
+        if coordinator?.resizingTrackIndex == nil {
+            if currentCursorPushed != nil { NSCursor.pop(); currentCursorPushed = nil }
+        }
     }
 
     override func mouseDown(with event: NSEvent) {
@@ -528,6 +592,7 @@ class TimelineContentView: NSView {
     override func rightMouseDown(with event: NSEvent) {
         coordinator?.handleRightClick(at: convert(event.locationInWindow, from: nil), event: event, view: self)
     }
+
 
     // MARK: - Drag and Drop
 
@@ -575,11 +640,16 @@ class TimelineCoordinator: NSObject {
     var lastTotalDurationMs: Double = -1
     var lastPixelsPerSecond: Double = -1
     var lastSelectedClipIds: Set<String> = []
+    var lastWaveformRevision: Int = -1
 
     private var basePixelsPerSecond: Double = 100
     private var currentPinchScale: Double = 1
+    private var pinchAnchorTimeMs: Double?
+    private var pinchAnchorLocalX: CGFloat?
+    private var isPinchActive: Bool = false
     private var timeObserverCancellable: AnyCancellable?
     private var scrollObserver: NSObjectProtocol?
+    private var magnifyMonitor: Any?
 
     init(timelineVM: TimelineViewModel, playerVM: PlayerViewModel, mediaFiles: [MediaFile]) {
         self.timelineVM = timelineVM
@@ -590,11 +660,39 @@ class TimelineCoordinator: NSObject {
 
     deinit {
         if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs) }
+        if let m = magnifyMonitor { NSEvent.removeMonitor(m) }
     }
 
     func setup() {
         guard let container = container else { return }
         container.contentView.coordinator = self
+        container.scrollView.coordinator = self
+
+        // SINGLE source of truth for trackpad pinch zoom: window-level event monitor.
+        // This avoids the responder-chain unreliability of NSScrollView + SwiftUI hosting,
+        // and prevents double-handling between gesture recognizers and magnify(with:) overrides
+        // (which was causing the "sometimes works, sometimes not" behavior).
+        container.gestureRecognizers.forEach { container.removeGestureRecognizer($0) }
+        container.scrollView.gestureRecognizers.forEach { gr in
+            if gr is NSMagnificationGestureRecognizer {
+                container.scrollView.removeGestureRecognizer(gr)
+            }
+        }
+        if let m = magnifyMonitor { NSEvent.removeMonitor(m); magnifyMonitor = nil }
+        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify]) { [weak self] event in
+            guard let self, let container = self.container, let window = container.window else { return event }
+
+            // Production-grade hit test: don't trust event.window/locationInWindow to always match
+            // during magnify gestures. Use global mouse location -> window coords -> container coords.
+            let mouseOnScreen = NSEvent.mouseLocation
+            let mouseInWindow = window.convertPoint(fromScreen: mouseOnScreen)
+            let mouseInContainer = container.convert(mouseInWindow, from: nil)
+            guard container.bounds.contains(mouseInContainer) else { return event }
+
+            self.handleMagnifyEvent(event)
+            // Swallow the event so no other view (e.g. NSScrollView) reacts to it.
+            return nil
+        }
 
         // Subscribe to player time stream for lightweight playhead updates
         timeObserverCancellable = playerVM.timeStream
@@ -622,6 +720,8 @@ class TimelineCoordinator: NSObject {
 
         rebuildLayers()
     }
+
+    // Gesture-recognizer path intentionally removed — single NSEvent monitor handles pinch zoom.
 
     // MARK: - Rebuild (expensive — only when data changes)
 
@@ -664,37 +764,69 @@ class TimelineCoordinator: NSObject {
         }
     }
 
-    // MARK: - Pinch-to-Zoom
+    func handleMagnifyEvent(_ event: NSEvent) {
+        // event.magnification is a PER-EVENT delta — accumulate into currentPinchScale.
+        // Robust state: if we missed `.began` (e.g. pinch started while cursor was outside our
+        // hit area, then moved in), treat the first observed event as the gesture start.
+        let isStart = event.phase == .began || !isPinchActive
+        if isStart {
+            isPinchActive = true
+            basePixelsPerSecond = timelineVM.pixelsPerSecond
+            currentPinchScale = 1
+            if let container = container {
+                // Use global mouse location for anchor; event.locationInWindow is not reliable
+                // when magnify events come through local monitors or during gesture phase changes.
+                let window = container.window
+                let mouseOnScreen = NSEvent.mouseLocation
+                let mouseInWindow = window?.convertPoint(fromScreen: mouseOnScreen) ?? event.locationInWindow
+                let local = container.contentView.convert(mouseInWindow, from: nil)
+                pinchAnchorLocalX = local.x
+                if local.x > container.contentView.trackHeaderWidth {
+                    pinchAnchorTimeMs = timelineVM.xToMs(local.x - container.contentView.trackHeaderWidth)
+                } else {
+                    pinchAnchorTimeMs = nil
+                }
+            }
+        }
 
-    func handleMagnify(_ gesture: NSMagnificationGestureRecognizer) {
-        switch gesture.state {
-        case .began:
-            basePixelsPerSecond = timelineVM.pixelsPerSecond
-        case .changed:
-            let newPps = basePixelsPerSecond * (1 + gesture.magnification)
-            timelineVM.setZoom(newPps)
+        currentPinchScale = max(0.05, currentPinchScale * (1 + event.magnification))
+        let prevPPS = timelineVM.pixelsPerSecond
+        timelineVM.setZoom(basePixelsPerSecond * currentPinchScale)
+        if timelineVM.pixelsPerSecond != prevPPS {
             rebuildLayers()
-        case .ended, .cancelled:
+            stabilizeScrollAfterZoom()
+        }
+
+        if event.phase == .ended || event.phase == .cancelled {
+            isPinchActive = false
             basePixelsPerSecond = timelineVM.pixelsPerSecond
-        default:
-            break
+            currentPinchScale = 1
+            pinchAnchorTimeMs = nil
+            pinchAnchorLocalX = nil
         }
     }
 
-    func handleMagnifyEvent(_ event: NSEvent) {
-        if event.phase == .began {
-            basePixelsPerSecond = timelineVM.pixelsPerSecond
-            currentPinchScale = 1
-        }
+    private func stabilizeScrollAfterZoom() {
+        guard let container = container,
+              let anchorMs = pinchAnchorTimeMs,
+              let anchorLocalX = pinchAnchorLocalX else { return }
 
-        // NSEvent magnification is delta per event; accumulate for smooth native pinch.
-        currentPinchScale *= (1 + event.magnification)
-        timelineVM.setZoom(basePixelsPerSecond * currentPinchScale)
-        rebuildLayers()
+        let cv = container.contentView
+        let clipView = container.scrollView.contentView
 
-        if event.phase == .ended || event.phase == .cancelled {
-            basePixelsPerSecond = timelineVM.pixelsPerSecond
-            currentPinchScale = 1
+        // Document-space x of the anchor time after zoom.
+        let anchorDocX = cv.trackHeaderWidth + timelineVM.msToX(anchorMs)
+
+        // Choose bounds origin so that the anchor stays under the same local x in the viewport.
+        var newOriginX = anchorDocX - anchorLocalX
+
+        let maxOriginX = max(0, cv.frame.width - clipView.bounds.width)
+        newOriginX = min(max(0, newOriginX), maxOriginX)
+
+        if abs(clipView.bounds.origin.x - newOriginX) > 0.5 {
+            clipView.setBoundsOrigin(NSPoint(x: newOriginX, y: clipView.bounds.origin.y))
+            // Keep headers pinned after programmatic scroll.
+            container.contentView.pinHeaders(scrollX: newOriginX)
         }
     }
 
@@ -705,11 +837,22 @@ class TimelineCoordinator: NSObject {
     var initialTrackHeight: CGFloat?
     var isScrubbing: Bool = false
 
+    private var isMarqueeSelecting: Bool = false
+    private var marqueeStart: CGPoint = .zero
+    private var marqueeBaseSelection: Set<String> = []
+    private var marqueeMoved: Bool = false
+
     func handleMouseDown(at location: CGPoint, event: NSEvent) {
         guard let cv = container?.contentView else { return }
         
+        // Any click outside clips should deselect (unless user is additive selecting with ⌘).
+        // We'll still allow click-to-seek on ruler, but it should clear selection.
+
         // ── Ruler area: start playhead scrubbing immediately ──────────────────
         if location.y < cv.rulerHeight {
+            if !event.modifierFlags.contains(.command) {
+                timelineVM.clearSelection()
+            }
             if location.x > cv.trackHeaderWidth {
                 isScrubbing = true
                 let clipX = location.x - cv.trackHeaderWidth
@@ -717,6 +860,7 @@ class TimelineCoordinator: NSObject {
                 playerVM.seek(to: ms)
                 cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
             }
+            rebuildLayers()
             return
         }
 
@@ -728,12 +872,13 @@ class TimelineCoordinator: NSObject {
             let tHeight = timelineVM.trackHeights[track.trackIndex] ?? cv.trackHeight
             currentY += tHeight
             
-            // Resize boundary hit (4-pt zone at bottom of header)
-            if location.x <= cv.trackHeaderWidth && abs(location.y - currentY) < 4 {
+            // Resize boundary hit (4-pt zone at bottom of track)
+            if abs(location.y - currentY) < 4 {
                 resizingTrackIndex = track.trackIndex
                 initialDragY = location.y
                 initialTrackHeight = tHeight
                 NSCursor.resizeUpDown.push() // lock cursor for the full drag
+                cv.currentCursorPushed = .resizeUpDown // keep state in sync
                 return
             }
             
@@ -746,18 +891,29 @@ class TimelineCoordinator: NSObject {
         guard foundTrackIndex != -1 else { return }
 
         if location.x > cv.trackHeaderWidth {
-            isScrubbing = true
             let clipX = location.x - cv.trackHeaderWidth
             
             if let clip = timelineVM.clipAt(trackIndex: foundTrackIndex, x: clipX) {
                 timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
+                isScrubbing = true
             } else {
-                timelineVM.clearSelection()
+                if !event.modifierFlags.contains(.command) {
+                    timelineVM.clearSelection()
+                }
+                // Begin marquee selection on empty space.
+                isMarqueeSelecting = true
+                marqueeMoved = false
+                marqueeStart = location
+                marqueeBaseSelection = timelineVM.selectedClipIds
+                cv.showMarquee(CGRect(origin: location, size: .zero))
             }
             
-            let ms = min(timelineVM.xToMs(clipX), timelineVM.totalDurationMs)
-            playerVM.seek(to: ms)
-            cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+            // If we clicked an actual clip, behave like normal click-to-seek/scrub.
+            if !isMarqueeSelecting {
+                let ms = min(timelineVM.xToMs(clipX), timelineVM.totalDurationMs)
+                playerVM.seek(to: ms)
+                cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+            }
             rebuildLayers()
         }
     }
@@ -781,6 +937,22 @@ class TimelineCoordinator: NSObject {
             }
             return
         }
+
+        // ── Marquee selection ────────────────────────────────────────────────
+        if isMarqueeSelecting {
+            let rect = normalizedRect(from: marqueeStart, to: loc)
+            marqueeMoved = marqueeMoved || rect.width > 3 || rect.height > 3
+            cv.showMarquee(rect)
+
+            let ids = clipsIntersecting(rect: rect)
+            if event.modifierFlags.contains(.command) {
+                timelineVM.setSelection(marqueeBaseSelection.union(ids))
+            } else {
+                timelineVM.setSelection(ids)
+            }
+            rebuildLayers()
+            return
+        }
         
         // ── Playhead scrubbing ────────────────────────────────────────────────
         if isScrubbing && loc.x > cv.trackHeaderWidth {
@@ -793,14 +965,67 @@ class TimelineCoordinator: NSObject {
     }
 
     func handleMouseUp(with event: NSEvent) {
+        if isMarqueeSelecting {
+            // Treat a tiny marquee as a click-to-seek on empty space.
+            if !marqueeMoved, let cv = container?.contentView {
+                let loc = cv.convert(event.locationInWindow, from: nil)
+                if loc.x > cv.trackHeaderWidth {
+                    let ms = min(timelineVM.xToMs(loc.x - cv.trackHeaderWidth), timelineVM.totalDurationMs)
+                    playerVM.seek(to: ms)
+                    cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+                }
+            }
+            container?.contentView.showMarquee(nil)
+            isMarqueeSelecting = false
+            marqueeMoved = false
+            marqueeBaseSelection = []
+            rebuildLayers()
+        }
         if resizingTrackIndex != nil {
-            NSCursor.pop() // restore arrow after resize drag
+            // Pop the resize cursor that was pushed on mouseDown
+            if container?.contentView.currentCursorPushed != nil {
+                NSCursor.pop()
+                container?.contentView.currentCursorPushed = nil
+            }
         }
         resizingTrackIndex = nil
         initialDragY = nil
         initialTrackHeight = nil
         isScrubbing = false
-        container?.contentView.window?.invalidateCursorRects(for: container!.contentView)
+    }
+
+    private func normalizedRect(from a: CGPoint, to b: CGPoint) -> CGRect {
+        CGRect(
+            x: min(a.x, b.x),
+            y: min(a.y, b.y),
+            width: abs(a.x - b.x),
+            height: abs(a.y - b.y)
+        )
+    }
+
+    private func clipsIntersecting(rect: CGRect) -> Set<String> {
+        guard let cv = container?.contentView else { return [] }
+
+        var result: Set<String> = []
+        var currentY = cv.rulerHeight
+
+        for track in timelineVM.tracks {
+            let tHeight = timelineVM.trackHeights[track.trackIndex] ?? cv.trackHeight
+            let trackRect = CGRect(x: cv.trackHeaderWidth, y: currentY, width: cv.frame.width - cv.trackHeaderWidth, height: tHeight)
+            if rect.intersects(trackRect) {
+                for clip in track.clips where clip.color != .gap {
+                    let clipX = cv.trackHeaderWidth + CGFloat(clip.startMs / 1000.0 * timelineVM.pixelsPerSecond)
+                    let clipW = max(2, CGFloat(clip.durationMs / 1000.0 * timelineVM.pixelsPerSecond))
+                    let clipRect = CGRect(x: clipX, y: currentY + 2, width: clipW, height: tHeight - 4)
+                    if rect.intersects(clipRect) {
+                        result.insert(clip.id)
+                    }
+                }
+            }
+            currentY += tHeight
+        }
+
+        return result
     }
 
     // MARK: - Cursor Hit Testing
@@ -812,7 +1037,7 @@ class TimelineCoordinator: NSObject {
         var currentY = cv.rulerHeight
         for track in timelineVM.tracks {
             currentY += timelineVM.trackHeights[track.trackIndex] ?? cv.trackHeight
-            if location.x <= cv.trackHeaderWidth && abs(location.y - currentY) < 4 {
+            if abs(location.y - currentY) < 4 {
                 return .resizeUpDown
             }
         }
@@ -910,41 +1135,140 @@ class TimelineCoordinator: NSObject {
         let timeMs = timelineVM.xToMs(dropX)
         var droppedFile: MediaFile?
 
-        if let pasteboardData = info.draggingPasteboard.data(forType: .init(UTType.abscidoMediaFile.identifier)),
-           let file = try? JSONDecoder().decode(MediaFile.self, from: pasteboardData) {
-            droppedFile = file
-        } else if let urlStr = info.draggingPasteboard.string(forType: .fileURL), let url = URL(string: urlStr) {
-            droppedFile = mediaFiles.first { $0.url == url }
-        } else if let urls = info.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
-                  let first = urls.first {
-            droppedFile = mediaFiles.first { $0.url == first }
+        let pb = info.draggingPasteboard
+        
+        // Debug: print all available types so we know exactly what the drag source provided
+        print("[Drop] Available pasteboard types: \(pb.types ?? [])")
+
+        // Method 1: standard NSURL reading (Finder drags, most apps)
+        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL],
+           let first = urls.first {
+            print("[Drop] Method 1 URL: \(first)")
+            droppedFile = mediaFiles.first { $0.url.standardizedFileURL == first.standardizedFileURL }
+            if droppedFile == nil {
+                droppedFile = mediaFiles.first { $0.url.lastPathComponent == first.lastPathComponent }
+            }
+        }
+
+        // Method 2: "public.file-url" string type (NSItemProvider writes this)
+        if droppedFile == nil,
+           let urlString = pb.string(forType: NSPasteboard.PasteboardType("public.file-url")),
+           let url = URL(string: urlString) {
+            print("[Drop] Method 2 URL: \(url)")
+            droppedFile = mediaFiles.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+            if droppedFile == nil {
+                droppedFile = mediaFiles.first { $0.url.lastPathComponent == url.lastPathComponent }
+            }
+        }
+
+        // Method 3: fileURL pboard type string
+        if droppedFile == nil,
+           let urlString = pb.string(forType: .fileURL),
+           let url = URL(string: urlString) {
+            print("[Drop] Method 3 URL: \(url)")
+            droppedFile = mediaFiles.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+            if droppedFile == nil {
+                droppedFile = mediaFiles.first { $0.url.lastPathComponent == url.lastPathComponent }
+            }
+        }
+
+        // Method 4: NSFilenamesPboardType (classic AppKit, Finder)
+        if droppedFile == nil,
+           let filenames = pb.propertyList(forType: NSPasteboard.PasteboardType("NSFilenamesPboardType")) as? [String],
+           let first = filenames.first {
+            let url = URL(fileURLWithPath: first)
+            print("[Drop] Method 4 (NSFilenamesPboardType) URL: \(url)")
+            droppedFile = mediaFiles.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+            if droppedFile == nil {
+                droppedFile = mediaFiles.first { $0.url.lastPathComponent == url.lastPathComponent }
+            }
+        }
+
+        // Method 5: promised file URL
+        if droppedFile == nil,
+           let urlString = pb.string(forType: NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url")),
+           let url = URL(string: urlString) {
+            print("[Drop] Method 5 URL: \(url)")
+            droppedFile = mediaFiles.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+            if droppedFile == nil {
+                droppedFile = mediaFiles.first { $0.url.lastPathComponent == url.lastPathComponent }
+            }
         }
         
         guard let file = droppedFile else {
-            print("Failed to read media file from pasteboard. Available types: \(info.draggingPasteboard.types ?? [])")
+            print("[Drop] FAILED — available types: \(info.draggingPasteboard.types ?? [])")
             return false
         }
 
+        let (vIndex, aIndex) = dropTargetTrackPair(for: location) ?? defaultTrackPair()
+
+        // Default: overwrite at the dropped timecode. Hold ⌥ Option to insert-and-ripple.
         if NSEvent.modifierFlags.contains(.option) {
-            timelineVM.insertMedia(file, atTimeMs: timeMs, allMediaFiles: mediaFiles)
+            timelineVM.insertMediaOnTracks(file, atTimeMs: timeMs, allMediaFiles: mediaFiles, videoTrackIndex: vIndex, audioTrackIndex: aIndex)
         } else {
-            timelineVM.overwriteMedia(file, atTimeMs: timeMs, allMediaFiles: mediaFiles)
+            timelineVM.overwriteMediaOnTracks(file, atTimeMs: timeMs, allMediaFiles: mediaFiles, videoTrackIndex: vIndex, audioTrackIndex: aIndex)
         }
-        rebuildLayers()
         return true
     }
 
+    private func defaultTrackPair() -> (Int, Int) {
+        let vids = timelineVM.tracks.enumerated().compactMap { $0.element.kind == .video ? $0.offset : nil }
+        let auds = timelineVM.tracks.enumerated().compactMap { $0.element.kind == .audio ? $0.offset : nil }
+        return (vids.first ?? 0, auds.first ?? min(1, max(0, timelineVM.tracks.count - 1)))
+    }
+
+    private func dropTargetTrackPair(for location: CGPoint) -> (Int, Int)? {
+        guard let cv = container?.contentView else { return nil }
+        if location.y < cv.rulerHeight { return nil }
+
+        var currentY = cv.rulerHeight
+        var hitTrackOffset: Int?
+
+        for (idx, track) in timelineVM.tracks.enumerated() {
+            let tHeight = timelineVM.trackHeights[track.trackIndex] ?? cv.trackHeight
+            if location.y >= currentY && location.y < currentY + tHeight {
+                hitTrackOffset = idx
+                break
+            }
+            currentY += tHeight
+        }
+
+        guard let target = hitTrackOffset else { return nil }
+        let targetKind = timelineVM.tracks[target].kind
+
+        let videoOffsets = timelineVM.tracks.enumerated().compactMap { $0.element.kind == .video ? $0.offset : nil }
+        let audioOffsets = timelineVM.tracks.enumerated().compactMap { $0.element.kind == .audio ? $0.offset : nil }
+
+        func ordinal(of trackOffset: Int, within kind: OTIOTrackKind) -> Int {
+            timelineVM.tracks.enumerated().reduce(into: 0) { acc, pair in
+                if pair.offset < trackOffset && pair.element.kind == kind { acc += 1 }
+            }
+        }
+
+        let ord = ordinal(of: target, within: targetKind)
+
+        if targetKind == .video {
+            let v = videoOffsets[min(ord, max(0, videoOffsets.count - 1))]
+            let a = audioOffsets.isEmpty ? v : audioOffsets[min(ord, max(0, audioOffsets.count - 1))]
+            return (v, a)
+        } else {
+            let a = audioOffsets[min(ord, max(0, audioOffsets.count - 1))]
+            let v = videoOffsets.isEmpty ? a : videoOffsets[min(ord, max(0, videoOffsets.count - 1))]
+            return (v, a)
+        }
+    }
+
     func canAcceptDrop(from info: NSDraggingInfo) -> Bool {
+        // IMPORTANT: During a drag, promised-item data is NOT yet resolved.
+        // Must use availableType(from:) which only checks type identifiers.
         let pb = info.draggingPasteboard
-        if pb.data(forType: .init(UTType.abscidoMediaFile.identifier)) != nil {
-            return true
-        }
-        if pb.string(forType: .fileURL) != nil {
-            return true
-        }
-        if let urls = pb.readObjects(forClasses: [NSURL.self], options: nil) as? [URL], !urls.isEmpty {
-            return true
-        }
-        return false
+        return pb.availableType(from: [
+            .fileURL,
+            .URL,
+            NSPasteboard.PasteboardType("public.file-url"),
+            NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url"),
+            NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-content-url"),
+            NSPasteboard.PasteboardType("NSFilenamesPboardType"),
+        ]) != nil
     }
 }

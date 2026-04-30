@@ -9,6 +9,7 @@ The transcript IS the timeline — delete words in the transcript, and the video
 - **Xcode 16** with Swift 5.10
 - **Apple Silicon** Mac (M1 or later) — required for MLX-Whisper transcription
 - **Python 3.12** (arm64) — for MLX-Whisper local transcription
+- **OpenTimelineIO** Open Source API and interchange format for editorial timeline information.
 
 ## Quick Start
 
@@ -75,7 +76,7 @@ Abscido/
 │   ├── Commands/           # DeleteWords, AcceptBadTake, CompileEdit
 │   └── Errors/             # AbscidoError enum
 ├── Engines/                # Core processing (all Swift actors)
-│   ├── OTIOEngine/         # Timeline data model (OTIO-compatible)
+│   ├── OTIOEngine/         # OpenTimelineIO (opensource) Timeline data model (OTIO-compatible)
 │   ├── MediaEngine/        # AVFoundation: import, composition, playback, export
 │   ├── TranscriptionEngine/# MLX-Whisper Python subprocess management
 │   ├── AIEngine/           # Anthropic API for bad take detection

@@ -60,17 +60,10 @@ struct MediaClipRow: View {
         }
         .padding(.vertical, 4)
         .onDrag {
-            let provider = NSItemProvider()
-            if let data = try? JSONEncoder().encode(file) {
-                provider.registerDataRepresentation(
-                    forTypeIdentifier: UTType.abscidoMediaFile.identifier,
-                    visibility: .all
-                ) { completion in
-                    completion(data, nil)
-                    return nil
-                }
-            }
-            return provider
+            // NSItemProvider(object: NSURL) registers the URL as kUTTypeFileURL
+            // which AppKit reads reliably via pb.readObjects(forClasses: [NSURL.self]).
+            // This is the most compatible approach for AppKit NSDraggingDestination.
+            NSItemProvider(object: file.url as NSURL)
         }
     }
 }

@@ -169,9 +169,95 @@ actor OTIOEngine {
     }
 
     private func overwriteInTrack(_ track: inout OTIOTrack, clip: OTIOClip, atTimeMs: Double, durationMs: Double) {
-        // Simple overwrite: remove items in the range, then insert
-        // For now, append at end as a simplified overwrite
-        track.children.append(.clip(clip))
+        let startMs = max(0, atTimeMs)
+        let endMs = startMs + max(0, durationMs)
+        let original = track.children
+
+        var newChildren: [OTIOItem] = []
+        newChildren.reserveCapacity(original.count + 1)
+
+        var inserted = false
+        var cursorMs: Double = 0
+
+        for item in original {
+            let itemDurMs: Double
+            switch item {
+            case .clip(let c): itemDurMs = c.sourceRange.durationMs
+            case .gap(let g): itemDurMs = g.sourceRange.durationMs
+            }
+
+            let itemStart = cursorMs
+            let itemEnd = cursorMs + itemDurMs
+
+            // Entirely before overwrite window
+            if itemEnd <= startMs {
+                newChildren.append(item)
+                cursorMs = itemEnd
+                continue
+            }
+
+            // Entirely after overwrite window
+            if itemStart >= endMs {
+                if !inserted {
+                    newChildren.append(.clip(clip))
+                    inserted = true
+                }
+                newChildren.append(item)
+                cursorMs = itemEnd
+                continue
+            }
+
+            // Overlaps overwrite window
+            if itemStart < startMs {
+                let leftDur = startMs - itemStart
+                if let leftItem = trimmedItem(item, keepStartOffsetMs: 0, keepDurationMs: leftDur) {
+                    newChildren.append(leftItem)
+                }
+            }
+
+            if !inserted {
+                newChildren.append(.clip(clip))
+                inserted = true
+            }
+
+            if itemEnd > endMs {
+                let rightStartOffset = endMs - itemStart
+                let rightDur = itemEnd - endMs
+                if let rightItem = trimmedItem(item, keepStartOffsetMs: rightStartOffset, keepDurationMs: rightDur) {
+                    newChildren.append(rightItem)
+                }
+            }
+
+            cursorMs = itemEnd
+        }
+
+        if !inserted {
+            newChildren.append(.clip(clip))
+        }
+
+        track.children = newChildren
+    }
+
+    private func trimmedItem(_ item: OTIOItem, keepStartOffsetMs: Double, keepDurationMs: Double) -> OTIOItem? {
+        guard keepDurationMs > 0.5 else { return nil }
+
+        switch item {
+        case .clip(let c):
+            let rate = c.sourceRange.startTime.rate
+            let newStartMs = c.sourceRange.startMs + keepStartOffsetMs
+            let newStartTime = OTIOTime.fromMs(newStartMs, rate: rate)
+            let newDuration = OTIOTime.fromMs(keepDurationMs, rate: rate)
+            var newClip = c
+            newClip.sourceRange = OTIOTimeRange(startTime: newStartTime, duration: newDuration)
+            return .clip(newClip)
+
+        case .gap(let g):
+            let rate = g.sourceRange.startTime.rate
+            let newStartTime = g.sourceRange.startTime
+            let newDuration = OTIOTime.fromMs(keepDurationMs, rate: rate)
+            let newGap = OTIOGap(sourceRange: OTIOTimeRange(startTime: newStartTime, duration: newDuration))
+            return .gap(newGap)
+        }
     }
 
     // MARK: - Delete
