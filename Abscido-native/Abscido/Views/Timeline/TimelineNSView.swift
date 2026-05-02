@@ -1138,14 +1138,25 @@ class TimelineCoordinator: NSObject {
 
     private func buildContextMenu(hasSelection: Bool) -> NSMenu {
         let menu = NSMenu()
+        // Default `true` re-validates targets and ignores `isEnabled` for NSObject targets → Link/Unlink
+        // stayed active with a single clip selected unless this is disabled.
+        menu.autoenablesItems = false
         if hasSelection {
             menu.addItem(withTitle: "Cut", action: #selector(cutAction), keyEquivalent: "x").target = self
             menu.addItem(withTitle: "Copy", action: #selector(copyAction), keyEquivalent: "c").target = self
             menu.addItem(withTitle: "Paste", action: #selector(pasteAction), keyEquivalent: "v").target = self
             menu.addItem(withTitle: "Delete", action: #selector(deleteAction), keyEquivalent: "\u{08}").target = self
             menu.addItem(NSMenuItem.separator())
-            menu.addItem(withTitle: "Link", action: #selector(linkAction), keyEquivalent: "l").target = self
-            menu.addItem(withTitle: "Unlink", action: #selector(unlinkAction), keyEquivalent: "L").target = self
+
+            let linkItem = menu.addItem(withTitle: "Link", action: #selector(linkAction), keyEquivalent: "l")
+            linkItem.target = self
+            linkItem.keyEquivalentModifierMask = .command
+            linkItem.isEnabled = timelineVM.canLinkSelectedClips
+
+            let unlinkItem = menu.addItem(withTitle: "Unlink", action: #selector(unlinkAction), keyEquivalent: "l")
+            unlinkItem.target = self
+            unlinkItem.keyEquivalentModifierMask = [.command, .shift]
+            unlinkItem.isEnabled = timelineVM.canUnlinkSelectedClips
         } else {
             menu.addItem(withTitle: "Paste", action: #selector(pasteAction), keyEquivalent: "v").target = self
         }
@@ -1159,8 +1170,14 @@ class TimelineCoordinator: NSObject {
     @objc func copyAction() { timelineVM.copySelected() }
     @objc func pasteAction() { timelineVM.pasteAtPlayhead(); rebuildLayers() }
     @objc func deleteAction() { timelineVM.deleteSelected(); rebuildLayers() }
-    @objc func linkAction() { timelineVM.linkSelected(); rebuildLayers() }
-    @objc func unlinkAction() { timelineVM.unlinkSelected(); rebuildLayers() }
+    @objc func linkAction() {
+        guard timelineVM.canLinkSelectedClips else { return }
+        timelineVM.linkSelected(); rebuildLayers()
+    }
+    @objc func unlinkAction() {
+        guard timelineVM.canUnlinkSelectedClips else { return }
+        timelineVM.unlinkSelected(); rebuildLayers()
+    }
     @objc func addVideoTrack() { timelineVM.addTrack(kind: .video); rebuildLayers() }
     @objc func addAudioTrack() { timelineVM.addTrack(kind: .audio); rebuildLayers() }
 

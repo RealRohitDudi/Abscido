@@ -63,8 +63,8 @@ actor OTIOEngine {
 
     // MARK: - Insert
 
-    /// Inserts a media file at a time position, creating linked V+A clips.
-    /// In insert mode, existing clips are pushed right.
+    /// Places linked V+A at `atTimeMs` on the timeline (splits/overlaps gaps and clips, pads with gap
+    /// if the drop is past track end). Does not ripple-shift the rest of the track.
     func insertMedia(
         file: MediaFile,
         atTimeMs timeMs: Double,
@@ -98,32 +98,10 @@ actor OTIOEngine {
             linkGroupId: linkId
         )
 
-        insertClipIntoTrack(&tl.tracks[videoTrackIndex], clip: videoClip, atTimeMs: timeMs)
-        insertClipIntoTrack(&tl.tracks[audioTrackIndex], clip: audioClip, atTimeMs: timeMs)
+        // Place at exact timeline time (split gaps/clips, pad with gap after track end) — no ripple insert.
+        overwriteInTrack(&tl.tracks[videoTrackIndex], clip: videoClip, atTimeMs: timeMs, durationMs: sourceRange.durationMs)
+        overwriteInTrack(&tl.tracks[audioTrackIndex], clip: audioClip, atTimeMs: timeMs, durationMs: sourceRange.durationMs)
         self.timeline = tl
-    }
-
-    /// Inserts a clip at the given time position in a track.
-    private func insertClipIntoTrack(_ track: inout OTIOTrack, clip: OTIOClip, atTimeMs: Double) {
-        // Find insertion point
-        var accumulatedMs: Double = 0
-        var insertIndex = track.children.count
-
-        for (index, child) in track.children.enumerated() {
-            let childDurationMs: Double
-            switch child {
-            case .clip(let c): childDurationMs = c.sourceRange.durationMs
-            case .gap(let g): childDurationMs = g.sourceRange.durationMs
-            }
-
-            if atTimeMs <= accumulatedMs + childDurationMs / 2 {
-                insertIndex = index
-                break
-            }
-            accumulatedMs += childDurationMs
-        }
-
-        track.children.insert(.clip(clip), at: insertIndex)
     }
 
     // MARK: - Overwrite
@@ -168,6 +146,61 @@ actor OTIOEngine {
         self.timeline = tl
     }
 
+    private func itemDurationMs(_ item: OTIOItem) -> Double {
+        switch item {
+        case .clip(let c): return c.sourceRange.durationMs
+        case .gap(let g): return g.sourceRange.durationMs
+        }
+    }
+
+    private func gapItem(rate: Double, durationMs: Double) -> OTIOItem {
+        .gap(OTIOGap(sourceRange: OTIOTimeRange(
+            startTime: OTIOTime(value: 0, rate: rate),
+            duration: OTIOTime.fromMs(durationMs, rate: rate)
+        )))
+    }
+
+    /// Timeline [start,end) where `clipIndex` appears on one track prior to edits.
+    private func timelineBoundsOfClip(track ti: Int, clipIndex ci: Int, in tl: OTIOTimeline) -> (start: Double, duration: Double)? {
+        guard ti < tl.tracks.count, ci < tl.tracks[ti].children.count else { return nil }
+        var cursor = 0.0
+        for (j, child) in tl.tracks[ti].children.enumerated() {
+            let d = itemDurationMs(child)
+            if j == ci { return (cursor, d) }
+            cursor += d
+        }
+        return nil
+    }
+
+    /// After linking, all clips in the group share the same timeline start/duration (reference = first selected clip).
+    private func syncLinkedGroupTimelinePositions(
+        linkGroupId: String,
+        referenceStartMs: Double,
+        referenceDurationMs: Double,
+        timeline: inout OTIOTimeline
+    ) {
+        var extracted: [(Int, OTIOClip)] = []
+        for ti in timeline.tracks.indices {
+            for ci in (0..<timeline.tracks[ti].children.count).reversed() {
+                if case .clip(let c) = timeline.tracks[ti].children[ci], c.linkGroupId == linkGroupId {
+                    timeline.tracks[ti].children.remove(at: ci)
+                    extracted.append((ti, c))
+                }
+            }
+        }
+        for (ti, var clip) in extracted {
+            let rate = clip.sourceRange.startTime.rate
+            let clampedDur = min(clip.sourceRange.durationMs, referenceDurationMs)
+            guard clampedDur > 0.5 else { continue }
+            clip.sourceRange = OTIOTimeRange(
+                startTime: clip.sourceRange.startTime,
+                duration: OTIOTime.fromMs(clampedDur, rate: rate)
+            )
+            overwriteInTrack(&timeline.tracks[ti], clip: clip, atTimeMs: referenceStartMs, durationMs: referenceDurationMs)
+        }
+    }
+
+    /// Non-destructive placement: clip starts at `atTimeMs`, splits gaps/clips, pads with leading gap if past track end.
     private func overwriteInTrack(_ track: inout OTIOTrack, clip: OTIOClip, atTimeMs: Double, durationMs: Double) {
         let startMs = max(0, atTimeMs)
         let endMs = startMs + max(0, durationMs)
@@ -178,13 +211,10 @@ actor OTIOEngine {
 
         var inserted = false
         var cursorMs: Double = 0
+        let rate = clip.sourceRange.startTime.rate
 
         for item in original {
-            let itemDurMs: Double
-            switch item {
-            case .clip(let c): itemDurMs = c.sourceRange.durationMs
-            case .gap(let g): itemDurMs = g.sourceRange.durationMs
-            }
+            let itemDurMs = itemDurationMs(item)
 
             let itemStart = cursorMs
             let itemEnd = cursorMs + itemDurMs
@@ -232,6 +262,9 @@ actor OTIOEngine {
         }
 
         if !inserted {
+            if startMs > cursorMs + 0.5 {
+                newChildren.append(gapItem(rate: rate, durationMs: startMs - cursorMs))
+            }
             newChildren.append(.clip(clip))
         }
 
@@ -405,7 +438,12 @@ actor OTIOEngine {
 
     /// Links clips together by assigning a shared linkGroupId.
     func linkClips(trackIndices: [Int], clipIndices: [Int]) {
-        guard var tl = timeline else { return }
+        guard var tl = timeline,
+              trackIndices.count == clipIndices.count,
+              let firstT = trackIndices.first,
+              let firstC = clipIndices.first,
+              let anchor = timelineBoundsOfClip(track: firstT, clipIndex: firstC, in: tl) else { return }
+
         let newLinkId = UUID().uuidString
 
         for (ti, ci) in zip(trackIndices, clipIndices) {
@@ -415,6 +453,13 @@ actor OTIOEngine {
                 tl.tracks[ti].children[ci] = .clip(c)
             }
         }
+
+        syncLinkedGroupTimelinePositions(
+            linkGroupId: newLinkId,
+            referenceStartMs: anchor.start,
+            referenceDurationMs: anchor.duration,
+            timeline: &tl
+        )
         self.timeline = tl
     }
 
@@ -456,7 +501,8 @@ actor OTIOEngine {
             clip.linkGroupId = UUID().uuidString // New link IDs for pasted clips
 
             if let trackIndex = tl.tracks.firstIndex(where: { $0.kind == entry.trackKind }) {
-                insertClipIntoTrack(&tl.tracks[trackIndex], clip: clip, atTimeMs: timeMs)
+                let d = clip.sourceRange.durationMs
+                overwriteInTrack(&tl.tracks[trackIndex], clip: clip, atTimeMs: timeMs, durationMs: d)
             }
         }
 
@@ -471,10 +517,27 @@ actor OTIOEngine {
               fromTrack < tl.tracks.count,
               fromIndex < tl.tracks[fromTrack].children.count else { return }
 
-        let item = tl.tracks[fromTrack].children.remove(at: fromIndex)
-        if case .clip(let clip) = item {
-            if toTrack < tl.tracks.count {
-                insertClipIntoTrack(&tl.tracks[toTrack], clip: clip, atTimeMs: toTimeMs)
+        guard case .clip(let moved) = tl.tracks[fromTrack].children[fromIndex] else { return }
+
+        if let lg = moved.linkGroupId {
+            var extracted: [(Int, OTIOClip)] = []
+            for ti in tl.tracks.indices {
+                for ci in (0..<tl.tracks[ti].children.count).reversed() {
+                    if case .clip(let c) = tl.tracks[ti].children[ci], c.linkGroupId == lg {
+                        tl.tracks[ti].children.remove(at: ci)
+                        extracted.append((ti, c))
+                    }
+                }
+            }
+            for (ti, clip) in extracted.sorted(by: { $0.0 < $1.0 }) {
+                let d = clip.sourceRange.durationMs
+                overwriteInTrack(&tl.tracks[ti], clip: clip, atTimeMs: toTimeMs, durationMs: d)
+            }
+        } else {
+            let item = tl.tracks[fromTrack].children.remove(at: fromIndex)
+            if case .clip(let clip) = item, toTrack < tl.tracks.count {
+                let d = clip.sourceRange.durationMs
+                overwriteInTrack(&tl.tracks[toTrack], clip: clip, atTimeMs: toTimeMs, durationMs: d)
             }
         }
 

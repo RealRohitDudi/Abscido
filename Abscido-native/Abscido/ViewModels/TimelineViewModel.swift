@@ -164,20 +164,39 @@ final class TimelineViewModel {
 
     // MARK: - Selection
 
+    /// Expand any clip IDs to include all timeline clips sharing their `linkGroupId`.
+    private func expandedSelectionIncludingLinkedPartners(_ ids: Set<String>) -> Set<String> {
+        var result = ids
+        for clip in clips {
+            guard ids.contains(clip.id), let lg = clip.linkGroupId else { continue }
+            for c in clips where c.linkGroupId == lg {
+                result.insert(c.id)
+            }
+        }
+        return result
+    }
+
+    /// Clip IDs forming one linked partition (whole link group when linked, otherwise just that clip).
+    private func idsToRemoveWhenDeselecting(clipId: String) -> Set<String> {
+        guard let clip = clips.first(where: { $0.id == clipId }) else { return [clipId] }
+        guard let lg = clip.linkGroupId else { return [clipId] }
+        return Set(clips.filter { $0.linkGroupId == lg }.map(\.id))
+    }
+
     func selectClip(_ clipId: String, exclusive: Bool = true) {
         if exclusive {
-            selectedClipIds = [clipId]
+            selectedClipIds = expandedSelectionIncludingLinkedPartners([clipId])
         } else {
-            selectedClipIds.insert(clipId)
+            selectedClipIds = expandedSelectionIncludingLinkedPartners(selectedClipIds.union([clipId]))
         }
         updateSelectionState()
     }
 
     func toggleClipSelection(_ clipId: String) {
         if selectedClipIds.contains(clipId) {
-            selectedClipIds.remove(clipId)
+            selectedClipIds.subtract(idsToRemoveWhenDeselecting(clipId: clipId))
         } else {
-            selectedClipIds.insert(clipId)
+            selectedClipIds = expandedSelectionIncludingLinkedPartners(selectedClipIds.union([clipId]))
         }
         updateSelectionState()
     }
@@ -188,8 +207,29 @@ final class TimelineViewModel {
     }
 
     func setSelection(_ ids: Set<String>) {
-        selectedClipIds = ids
+        selectedClipIds = expandedSelectionIncludingLinkedPartners(ids)
         updateSelectionState()
+    }
+
+    // MARK: - Link / Unlink commands (selection rules)
+
+    /// Link is available only with ≥2 clips that are **not** already one shared linked group.
+    var canLinkSelectedClips: Bool {
+        let selected = selectedClips()
+        // One clip (or one logical ID after expansion failure) → no link/unlink ops.
+        guard selected.count >= 2, selectedClipIds.count >= 2 else { return false }
+        let firstGroup = selected[0].linkGroupId
+        let allShareSameLinkedGroup =
+            selected.allSatisfy { $0.linkGroupId == firstGroup } && firstGroup != nil
+        return !allShareSameLinkedGroup
+    }
+
+    /// Unlink is available only with ≥2 clips that **all** share the same non-nil `linkGroupId`.
+    var canUnlinkSelectedClips: Bool {
+        let selected = selectedClips()
+        guard selected.count >= 2, selectedClipIds.count >= 2 else { return false }
+        guard let g = selected[0].linkGroupId else { return false }
+        return selected.allSatisfy { $0.linkGroupId == g }
     }
 
     private func updateSelectionState() {
@@ -273,8 +313,8 @@ final class TimelineViewModel {
 
     func linkSelected() {
         Task {
+            guard canLinkSelectedClips else { return }
             let selected = selectedClips()
-            guard selected.count >= 2 else { return }
             let trackIndices = selected.map(\.trackIndex)
             let clipIndices = selected.map(\.clipIndex)
             await otioEngine.linkClips(trackIndices: trackIndices, clipIndices: clipIndices)
@@ -284,6 +324,7 @@ final class TimelineViewModel {
 
     func unlinkSelected() {
         Task {
+            guard canUnlinkSelectedClips else { return }
             let selected = selectedClips()
             let trackIndices = selected.map(\.trackIndex)
             let clipIndices = selected.map(\.clipIndex)
