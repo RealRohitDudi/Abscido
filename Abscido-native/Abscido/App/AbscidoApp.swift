@@ -1,8 +1,32 @@
 import SwiftUI
+import AppKit
+
+/// Ensures Abscido becomes the active application and installs its menus in the system menu bar.
+/// Without `NSApplication.activate` + `.regular` activation policy (especially when launched via
+/// `swift run` or certain debug hosts), macOS can keep Finder (or another app) “active” visually
+/// even while Abscido’s window is foregrounded — so SwiftUI `.commands { }` never show as Abscido.
+final class AbscidoAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if !flag {
+            for window in sender.windows {
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+        sender.activate(ignoringOtherApps: true)
+        return true
+    }
+}
 
 /// Main application entry point — single window group with menu commands and keyboard shortcuts.
 @main
 struct AbscidoApp: App {
+    @NSApplicationDelegateAdaptor(AbscidoAppDelegate.self) var appDelegate
+
     @State private var coordinator = AppCoordinator()
     private let shortcutManager = KeyboardShortcutManager.shared
 
@@ -12,6 +36,7 @@ struct AbscidoApp: App {
                 .environment(coordinator)
                 .frame(minWidth: 800, maxWidth: .infinity, minHeight: 600, maxHeight: .infinity)
                 .onAppear {
+                    NSApp.activate(ignoringOtherApps: true)
                     setDarkAppearance()
                 }
         }

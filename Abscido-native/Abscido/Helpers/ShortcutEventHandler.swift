@@ -42,17 +42,44 @@ final class ShortcutEventHandler {
         // Let ShortcutRecorderNSView capture the keystroke for reassignment.
         if event.window?.firstResponder is ShortcutRecorderNSView { return event }
 
-        // Don't intercept keystrokes while the user is typing in a text field.
-        if let responder = event.window?.firstResponder,
-           responder is NSTextView || responder is NSTextField {
-            return event
-        }
-
         guard let action = KeyboardShortcutManager.shared.action(for: event) else {
             return event
         }
 
+        // When the transcript / a text control is focused, send only keystrokes through that
+        // genuinely belong to editing (⌘CXV/A, arrows, undo, etc.). Timeline and other app
+        // shortcuts (⌘⇧T add track, ⌘⌥T, zoom, link clips, ⌘Return compile, ⌘S save…) still dispatch.
+        if passesToFocusedTextResponder(action, coordinator: coordinator, window: event.window) {
+            return event
+        }
+
         return dispatch(action: action, coordinator: coordinator) ? nil : event
+    }
+
+    /// When `NSTextView` / `NSTextField` is first responder, return true to leave the event for text editing.
+    @MainActor
+    private func passesToFocusedTextResponder(_ action: ShortcutAction, coordinator: AppCoordinator, window: NSWindow?) -> Bool {
+        guard let fr = window?.firstResponder else { return false }
+        guard fr is NSTextView || fr is NSTextField else { return false }
+
+        switch action {
+        case .cutClips, .copyClips, .pasteClips, .selectAll:
+            return true
+        case .undo, .redo:
+            return true
+        case .deleteClips:
+            return coordinator.timelineVM.selectedClipIds.isEmpty
+        case .playPause,
+             .stepForward, .stepBackward,
+             .shuttleForward, .shuttleReverse, .shuttlePause,
+             .goToStart, .goToEnd:
+            return true
+        // Prefer standard text-control semantics while typing (timeline uses these only after clicking the timeline).
+        case .importMedia, .exportDialog, .compileEdit, .zoomIn, .zoomOut:
+            return true
+        default:
+            return false
+        }
     }
 
     // MARK: - Dispatch

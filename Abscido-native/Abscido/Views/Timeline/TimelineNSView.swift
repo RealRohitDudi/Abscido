@@ -856,7 +856,9 @@ class TimelineCoordinator: NSObject {
 
     func handleMouseDown(at location: CGPoint, event: NSEvent) {
         guard let cv = container?.contentView else { return }
-        
+        // Take keyboard focus so `ShortcutEventHandler` treats targets as timeline, not transcript.
+        cv.window?.makeFirstResponder(cv)
+
         // Any click outside clips should deselect (unless user is additive selecting with ⌘).
         // We'll still allow click-to-seek on ruler, but it should clear selection.
 
@@ -876,7 +878,7 @@ class TimelineCoordinator: NSObject {
             return
         }
 
-        // ── Track area: find which track was clicked ───────────────────────────
+        // ── Track area (including empty gutter below all tracks): hit-test rows ─────────────────
         var currentY = cv.rulerHeight
         var foundTrackIndex = -1
         
@@ -899,33 +901,57 @@ class TimelineCoordinator: NSObject {
                 if location.x <= cv.trackHeaderWidth { break }
             }
         }
-        
-        guard foundTrackIndex != -1 else { return }
+
+        let trackStackBottom = currentY // bottom edge of stacked track lanes
+        /// Empty space beneath the lowest track inside the timeline content (full-width marquee lane).
+        let clickBelowTracks =
+            !timelineVM.tracks.isEmpty &&
+            location.y >= trackStackBottom &&
+            location.y <= cv.bounds.height
+
+        guard foundTrackIndex != -1 || clickBelowTracks else { return }
+
+        func beginMarquee(at origin: CGPoint) {
+            if !event.modifierFlags.contains(.command) {
+                timelineVM.clearSelection()
+            }
+            isMarqueeSelecting = true
+            marqueeMoved = false
+            marqueeStart = origin
+            marqueeBaseSelection = timelineVM.selectedClipIds
+            cv.showMarquee(CGRect(origin: origin, size: .zero))
+        }
 
         if location.x > cv.trackHeaderWidth {
             let clipX = location.x - cv.trackHeaderWidth
-            
-            if let clip = timelineVM.clipAt(trackIndex: foundTrackIndex, x: clipX) {
-                timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
-                isScrubbing = true
-            } else {
-                if !event.modifierFlags.contains(.command) {
-                    timelineVM.clearSelection()
+
+            // Lane click on a clip row → select / scrub; empty lane OR gutter below tracks → marquee
+            if clickBelowTracks {
+                beginMarquee(at: location)
+            } else if foundTrackIndex != -1 {
+                if let clip = timelineVM.clipAt(trackIndex: foundTrackIndex, x: clipX) {
+                    timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
+                    isScrubbing = true
+                } else {
+                    beginMarquee(at: location)
                 }
-                // Begin marquee selection on empty space.
-                isMarqueeSelecting = true
-                marqueeMoved = false
-                marqueeStart = location
-                marqueeBaseSelection = timelineVM.selectedClipIds
-                cv.showMarquee(CGRect(origin: location, size: .zero))
             }
-            
+
             // If we clicked an actual clip, behave like normal click-to-seek/scrub.
-            if !isMarqueeSelecting {
+            if foundTrackIndex != -1, timelineVM.clipAt(trackIndex: foundTrackIndex, x: clipX) != nil,
+               !clickBelowTracks,
+               !isMarqueeSelecting {
                 let ms = min(timelineVM.xToMs(clipX), timelineVM.totalDurationMs)
                 playerVM.seek(to: ms)
                 cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
             }
+            rebuildLayers()
+            return
+        }
+
+        // Left column (track labels): marquee + selection — same gestures as timeline body.
+        if clickBelowTracks || foundTrackIndex != -1 {
+            beginMarquee(at: location)
             rebuildLayers()
         }
     }

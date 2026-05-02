@@ -205,9 +205,23 @@ final class TimelineViewModel {
     func deleteSelected() {
         Task {
             let selected = selectedClips()
-            for clip in selected.reversed() {
-                await otioEngine.deleteLinkedClips(trackIndex: clip.trackIndex, clipIndex: clip.clipIndex)
-            }
+            guard !selected.isEmpty else { return }
+
+            // One atomic pass avoids stale `(trackIndex, clipIndex)` when both halves of a linked
+            // clip pair are selected: calling `deleteLinkedClips` twice used to remove index 0 twice
+            // on the video track — deleting the wrong (next) clip after the linked pair vanished.
+            let removeLinkGroups = Set(selected.compactMap(\.linkGroupId))
+            let explicitSlots = Set(
+                selected
+                    .filter { $0.linkGroupId == nil }
+                    .map { "\($0.trackIndex)_\($0.clipIndex)" }
+            )
+
+            await otioEngine.applyDeletion(
+                removeLinkGroupIds: removeLinkGroups,
+                explicitRemoveSlotKeys: explicitSlots
+            )
+
             selectedClipIds.removeAll()
             await refreshFromEngine()
             onTimelineChanged?()

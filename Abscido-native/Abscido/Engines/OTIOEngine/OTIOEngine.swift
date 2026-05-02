@@ -301,6 +301,39 @@ actor OTIOEngine {
         self.timeline = tl
     }
 
+    /// Atomic multi-delete driven by timeline selection snapshots.
+    ///
+    /// Indices `"\(trackIndex)_\(clipIndex)"` refer to the timeline **before** any removal (single pass).
+    /// Every clip matching `removeLinkGroupIds` is stripped from **all** tracks (linked A/V deletes once).
+    /// Non-linked clips and gaps appear only under `explicitRemoveSlotKeys` (clips with nil `linkGroupId`).
+    func applyDeletion(removeLinkGroupIds: Set<String>, explicitRemoveSlotKeys: Set<String>) {
+        guard var tl = timeline else { return }
+
+        for ti in tl.tracks.indices {
+            tl.tracks[ti].children = tl.tracks[ti].children.enumerated().compactMap { (ci, item) -> OTIOItem? in
+                switch item {
+                case .clip(let c):
+                    if let lgId = c.linkGroupId, removeLinkGroupIds.contains(lgId) {
+                        return nil
+                    }
+                    let key = "\(ti)_\(ci)"
+                    if explicitRemoveSlotKeys.contains(key) {
+                        return nil
+                    }
+                    return item
+                case .gap:
+                    let key = "\(ti)_\(ci)"
+                    if explicitRemoveSlotKeys.contains(key) {
+                        return nil
+                    }
+                    return item
+                }
+            }
+        }
+
+        self.timeline = tl
+    }
+
     // MARK: - Trim
 
     /// Trims a clip's start time (trim in-point).
