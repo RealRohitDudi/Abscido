@@ -10,9 +10,15 @@ import UniformTypeIdentifiers
 final class TimelineScrollView: NSScrollView {
     weak var coordinator: TimelineCoordinator?
     override var acceptsFirstResponder: Bool { true }
-    // NOTE: magnify handling intentionally NOT overridden here.
-    // We use a single window-level NSEvent monitor in TimelineCoordinator.setup()
-    // so we never double-handle pinch (which caused intermittent zoom).
+
+    /// ⌥ + two-finger scroll → timeline zoom (horizontal zoom semantics from vertical trackpad delta).
+    override func scrollWheel(with event: NSEvent) {
+        if event.modifierFlags.contains(.option) {
+            coordinator?.handleOptionScrollWheel(event)
+            return
+        }
+        super.scrollWheel(with: event)
+    }
 }
 
 /// High-performance multi-track timeline using NSScrollView + CALayer.
@@ -106,8 +112,7 @@ class TimelineScrollContainer: NSView {
         scrollView.drawsBackground = false
         scrollView.backgroundColor = .clear
         scrollView.usesPredominantAxisScrolling = false
-        // Disable NSScrollView's built-in magnification so it can't fight our zoom.
-        // We listen for trackpad pinch ourselves via a window-level NSEvent monitor.
+        // Custom zoom via `TimelineCoordinator.handleMagnifyEvent`; keep AppKit magnification off.
         scrollView.allowsMagnification = false
 
         let clipView = NSClipView()
@@ -141,11 +146,6 @@ class TimelineScrollContainer: NSView {
     override func layout() {
         super.layout()
         coordinator?.updateContentSize()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        // Nothing else needed; scroll view routes pinch to magnify(with:).
     }
 }
 
@@ -593,7 +593,6 @@ class TimelineContentView: NSView {
         coordinator?.handleRightClick(at: convert(event.locationInWindow, from: nil), event: event, view: self)
     }
 
-
     // MARK: - Drag and Drop
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
@@ -643,13 +642,12 @@ class TimelineCoordinator: NSObject {
     var lastWaveformRevision: Int = -1
 
     private var basePixelsPerSecond: Double = 100
-    private var currentPinchScale: Double = 1
     private var pinchAnchorTimeMs: Double?
     private var pinchAnchorLocalX: CGFloat?
-    private var isPinchActive: Bool = false
+    private var isMagnifyGestureActive: Bool = false
+    private var magnificationRecognizer: NSMagnificationGestureRecognizer?
     private var timeObserverCancellable: AnyCancellable?
     private var scrollObserver: NSObjectProtocol?
-    private var magnifyMonitor: Any?
 
     init(timelineVM: TimelineViewModel, playerVM: PlayerViewModel, mediaFiles: [MediaFile]) {
         self.timelineVM = timelineVM
@@ -660,7 +658,6 @@ class TimelineCoordinator: NSObject {
 
     deinit {
         if let obs = scrollObserver { NotificationCenter.default.removeObserver(obs) }
-        if let m = magnifyMonitor { NSEvent.removeMonitor(m) }
     }
 
     func setup() {
@@ -668,31 +665,14 @@ class TimelineCoordinator: NSObject {
         container.contentView.coordinator = self
         container.scrollView.coordinator = self
 
-        // SINGLE source of truth for trackpad pinch zoom: window-level event monitor.
-        // This avoids the responder-chain unreliability of NSScrollView + SwiftUI hosting,
-        // and prevents double-handling between gesture recognizers and magnify(with:) overrides
-        // (which was causing the "sometimes works, sometimes not" behavior).
-        container.gestureRecognizers.forEach { container.removeGestureRecognizer($0) }
-        container.scrollView.gestureRecognizers.forEach { gr in
-            if gr is NSMagnificationGestureRecognizer {
-                container.scrollView.removeGestureRecognizer(gr)
-            }
+        if let existing = magnificationRecognizer {
+            existing.view?.removeGestureRecognizer(existing)
+            magnificationRecognizer = nil
         }
-        if let m = magnifyMonitor { NSEvent.removeMonitor(m); magnifyMonitor = nil }
-        magnifyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.magnify]) { [weak self] event in
-            guard let self, let container = self.container, let window = container.window else { return event }
-
-            // Production-grade hit test: don't trust event.window/locationInWindow to always match
-            // during magnify gestures. Use global mouse location -> window coords -> container coords.
-            let mouseOnScreen = NSEvent.mouseLocation
-            let mouseInWindow = window.convertPoint(fromScreen: mouseOnScreen)
-            let mouseInContainer = container.convert(mouseInWindow, from: nil)
-            guard container.bounds.contains(mouseInContainer) else { return event }
-
-            self.handleMagnifyEvent(event)
-            // Swallow the event so no other view (e.g. NSScrollView) reacts to it.
-            return nil
-        }
+        let pinch = NSMagnificationGestureRecognizer(target: self, action: #selector(handleMagnificationGesture(_:)))
+        pinch.delegate = self
+        container.contentView.addGestureRecognizer(pinch)
+        magnificationRecognizer = pinch
 
         // Subscribe to player time stream for lightweight playhead updates
         timeObserverCancellable = playerVM.timeStream
@@ -720,8 +700,6 @@ class TimelineCoordinator: NSObject {
 
         rebuildLayers()
     }
-
-    // Gesture-recognizer path intentionally removed — single NSEvent monitor handles pinch zoom.
 
     // MARK: - Rebuild (expensive — only when data changes)
 
@@ -764,46 +742,79 @@ class TimelineCoordinator: NSObject {
         }
     }
 
-    func handleMagnifyEvent(_ event: NSEvent) {
-        // event.magnification is a PER-EVENT delta — accumulate into currentPinchScale.
-        // Robust state: if we missed `.began` (e.g. pinch started while cursor was outside our
-        // hit area, then moved in), treat the first observed event as the gesture start.
-        let isStart = event.phase == .began || !isPinchActive
-        if isStart {
-            isPinchActive = true
-            basePixelsPerSecond = timelineVM.pixelsPerSecond
-            currentPinchScale = 1
-            if let container = container {
-                // Use global mouse location for anchor; event.locationInWindow is not reliable
-                // when magnify events come through local monitors or during gesture phase changes.
-                let window = container.window
-                let mouseOnScreen = NSEvent.mouseLocation
-                let mouseInWindow = window?.convertPoint(fromScreen: mouseOnScreen) ?? event.locationInWindow
-                let local = container.contentView.convert(mouseInWindow, from: nil)
-                pinchAnchorLocalX = local.x
-                if local.x > container.contentView.trackHeaderWidth {
-                    pinchAnchorTimeMs = timelineVM.xToMs(local.x - container.contentView.trackHeaderWidth)
-                } else {
-                    pinchAnchorTimeMs = nil
-                }
-            }
-        }
+    // MARK: - Pinch zoom (`NSMagnificationGestureRecognizer`)
 
-        currentPinchScale = max(0.05, currentPinchScale * (1 + event.magnification))
-        let prevPPS = timelineVM.pixelsPerSecond
-        timelineVM.setZoom(basePixelsPerSecond * currentPinchScale)
-        if timelineVM.pixelsPerSecond != prevPPS {
-            rebuildLayers()
-            stabilizeScrollAfterZoom()
-        }
+    @objc private func handleMagnificationGesture(_ sender: NSMagnificationGestureRecognizer) {
+        guard let container else { return }
+        let doc = container.contentView
 
-        if event.phase == .ended || event.phase == .cancelled {
-            isPinchActive = false
+        switch sender.state {
+        case .began:
+            isMagnifyGestureActive = true
             basePixelsPerSecond = timelineVM.pixelsPerSecond
-            currentPinchScale = 1
+            let p = sender.location(in: doc)
+            captureZoomAnchor(contentPoint: p, docView: doc)
+
+        case .changed:
+            guard isMagnifyGestureActive else { return }
+            // `magnification` starts at 0 and changes during the pinch (additive scale offset).
+            let mult = CGFloat(max(0.02, 1 + sender.magnification))
+            applyZoomMultiplierFromGesture(mult)
+
+        case .ended, .cancelled, .failed:
+            // Do not apply zoom here — `magnification` is often reset before this callback.
+            isMagnifyGestureActive = false
+            clearZoomAnchor()
+            basePixelsPerSecond = timelineVM.pixelsPerSecond
+
+        default:
+            break
+        }
+    }
+
+    /// ⌥ + scroll: multiplicative zoom; anchor tracks the pointer each tick.
+    func handleOptionScrollWheel(_ event: NSEvent) {
+        guard let container else { return }
+        let doc = container.contentView
+        let mouseInWindow = container.window?.convertPoint(fromScreen: NSEvent.mouseLocation) ?? event.locationInWindow
+        let p = doc.convert(mouseInWindow, from: nil)
+        captureZoomAnchor(contentPoint: p, docView: doc)
+
+        let dy = Double(event.scrollingDeltaY + event.scrollingDeltaX)
+        guard dy != 0 else { return }
+
+        let mult = exp(-dy * 0.00125)
+        let prev = timelineVM.pixelsPerSecond
+        timelineVM.setZoom(prev * mult)
+        guard timelineVM.pixelsPerSecond != prev else {
+            clearZoomAnchor()
+            return
+        }
+        rebuildLayers()
+        stabilizeScrollAfterZoom()
+        clearZoomAnchor()
+    }
+
+    private func captureZoomAnchor(contentPoint p: CGPoint, docView: TimelineContentView) {
+        pinchAnchorLocalX = p.x
+        if p.x > docView.trackHeaderWidth {
+            pinchAnchorTimeMs = timelineVM.xToMs(p.x - docView.trackHeaderWidth)
+        } else {
             pinchAnchorTimeMs = nil
-            pinchAnchorLocalX = nil
         }
+    }
+
+    private func clearZoomAnchor() {
+        pinchAnchorTimeMs = nil
+        pinchAnchorLocalX = nil
+    }
+
+    private func applyZoomMultiplierFromGesture(_ multiplier: CGFloat) {
+        let prevPPS = timelineVM.pixelsPerSecond
+        timelineVM.setZoom(basePixelsPerSecond * Double(multiplier))
+        guard timelineVM.pixelsPerSecond != prevPPS else { return }
+        rebuildLayers()
+        stabilizeScrollAfterZoom()
     }
 
     private func stabilizeScrollAfterZoom() {
@@ -817,8 +828,9 @@ class TimelineCoordinator: NSObject {
         // Document-space x of the anchor time after zoom.
         let anchorDocX = cv.trackHeaderWidth + timelineVM.msToX(anchorMs)
 
-        // Choose bounds origin so that the anchor stays under the same local x in the viewport.
-        var newOriginX = anchorDocX - anchorLocalX
+        // Keep the time under the cursor fixed: S1 = anchorDocX - D0 + S0 (document / clip scroll offsets).
+        let scrollX0 = clipView.bounds.origin.x
+        var newOriginX = anchorDocX - anchorLocalX + scrollX0
 
         let maxOriginX = max(0, cv.frame.width - clipView.bounds.width)
         newOriginX = min(max(0, newOriginX), maxOriginX)
@@ -1272,3 +1284,5 @@ class TimelineCoordinator: NSObject {
         ]) != nil
     }
 }
+
+extension TimelineCoordinator: NSGestureRecognizerDelegate {}

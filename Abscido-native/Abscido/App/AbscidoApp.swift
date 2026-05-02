@@ -4,6 +4,7 @@ import SwiftUI
 @main
 struct AbscidoApp: App {
     @State private var coordinator = AppCoordinator()
+    private let shortcutManager = KeyboardShortcutManager.shared
 
     var body: some Scene {
         WindowGroup {
@@ -17,6 +18,14 @@ struct AbscidoApp: App {
         .windowStyle(.titleBar)
         .defaultSize(width: 1440, height: 900)
         .commands {
+            // MARK: - Abscido App Menu
+            CommandGroup(after: .appSettings) {
+                Button("Keyboard Shortcuts…") {
+                    coordinator.showKeyboardShortcuts = true
+                }
+                .keyboardShortcut("k", modifiers: [.command, .option])
+            }
+
             // MARK: - File Menu
             CommandGroup(replacing: .newItem) {
                 Button("New Project") {
@@ -29,12 +38,12 @@ struct AbscidoApp: App {
                 Button("Import Media...") {
                     coordinator.showImportPanel = true
                 }
-                .keyboardShortcut("i")
+                .modifier(DynamicShortcut(action: .importMedia))
 
                 Button("Save Project") {
                     coordinator.saveProject()
                 }
-                .keyboardShortcut("s")
+                .modifier(DynamicShortcut(action: .saveProject))
             }
 
             // MARK: - Edit Menu
@@ -42,41 +51,41 @@ struct AbscidoApp: App {
                 Button("Select All Words") {
                     coordinator.selectAllWords()
                 }
-                .keyboardShortcut("a")
+                .modifier(DynamicShortcut(action: .selectAll))
 
                 Divider()
 
                 Button("Cut Clips") {
                     coordinator.timelineVM.cutSelected()
                 }
-                .keyboardShortcut("x")
+                .modifier(DynamicShortcut(action: .cutClips))
 
                 Button("Copy Clips") {
                     coordinator.timelineVM.copySelected()
                 }
-                .keyboardShortcut("c")
+                .modifier(DynamicShortcut(action: .copyClips))
 
                 Button("Paste Clips") {
                     coordinator.timelineVM.pasteAtPlayhead()
                 }
-                .keyboardShortcut("v")
+                .modifier(DynamicShortcut(action: .pasteClips))
 
                 Button("Delete Clips") {
                     coordinator.timelineVM.deleteSelected()
                 }
-                .keyboardShortcut(.delete, modifiers: [])
+                .modifier(DynamicShortcut(action: .deleteClips))
 
                 Divider()
 
                 Button("Link Clips") {
                     coordinator.timelineVM.linkSelected()
                 }
-                .keyboardShortcut("l")
+                .modifier(DynamicShortcut(action: .linkClips))
 
                 Button("Unlink Clips") {
                     coordinator.timelineVM.unlinkSelected()
                 }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
+                .modifier(DynamicShortcut(action: .unlinkClips))
             }
 
             // MARK: - Export Menu
@@ -84,19 +93,19 @@ struct AbscidoApp: App {
                 Button("Compile Edit") {
                     coordinator.compileEdit()
                 }
-                .keyboardShortcut(.return, modifiers: .command)
+                .modifier(DynamicShortcut(action: .compileEdit))
 
                 Button("Export...") {
                     coordinator.showExport = true
                 }
-                .keyboardShortcut("e")
+                .modifier(DynamicShortcut(action: .exportDialog))
 
                 Divider()
 
                 Button("Export XML...") {
                     coordinator.showXmlExport = true
                 }
-                .keyboardShortcut("e", modifiers: [.command, .shift])
+                .modifier(DynamicShortcut(action: .xmlExport))
             }
 
             // MARK: - View Menu
@@ -104,17 +113,59 @@ struct AbscidoApp: App {
                 Button("Zoom In Timeline") {
                     coordinator.zoomInTimeline()
                 }
-                .keyboardShortcut("+")
+                .modifier(DynamicShortcut(action: .zoomIn))
 
                 Button("Zoom Out Timeline") {
                     coordinator.zoomOutTimeline()
                 }
-                .keyboardShortcut("-")
+                .modifier(DynamicShortcut(action: .zoomOut))
+            }
+
+            // MARK: - Timeline Menu
+            CommandMenu("Timeline") {
+                Button("Add Video Track") {
+                    coordinator.timelineVM.addTrack(kind: .video)
+                }
+                .modifier(DynamicShortcut(action: .addVideoTrack))
+
+                Button("Add Audio Track") {
+                    coordinator.timelineVM.addTrack(kind: .audio)
+                }
+                .modifier(DynamicShortcut(action: .addAudioTrack))
+
+                Divider()
+
+                Button("Go to Start") {
+                    coordinator.playerVM.seek(to: 0)
+                }
+                .modifier(DynamicShortcut(action: .goToStart))
+
+                Button("Go to End") {
+                    coordinator.playerVM.seek(to: coordinator.playerVM.durationMs)
+                }
+                .modifier(DynamicShortcut(action: .goToEnd))
             }
         }
     }
 
     private func setDarkAppearance() {
         NSApp.appearance = NSAppearance(named: .darkAqua)
+    }
+}
+
+// MARK: - Dynamic Shortcut Modifier
+
+/// Applies a KeyboardShortcut from the KeyboardShortcutManager to a menu item.
+/// Falls back gracefully if the action has no binding.
+struct DynamicShortcut: ViewModifier {
+    let action: ShortcutAction
+    private let manager = KeyboardShortcutManager.shared
+
+    func body(content: Content) -> some View {
+        if let shortcut = manager.swiftUIShortcut(for: action) {
+            content.keyboardShortcut(shortcut)
+        } else {
+            content
+        }
     }
 }

@@ -26,46 +26,20 @@ struct ContentView: View {
             onCompile: { coord.compileEdit() },
             onExport: { coord.showExport = true }
         )
-        // MARK: - Keyboard Shortcuts
-        .onKeyPress(.space) {
-            coord.playerVM.togglePlayPause()
-            return .handled
-        }
-        .onKeyPress(.delete) {
-            // Delete selected timeline clips, or fall back to transcript word deletion
-            if !coord.timelineVM.selectedClipIds.isEmpty {
-                coord.timelineVM.deleteSelected()
-            } else {
-                handleDelete()
-            }
-            return .handled
-        }
-        .onKeyPress(.leftArrow) {
-            coord.playerVM.stepBackward()
-            return .handled
-        }
-        .onKeyPress(.rightArrow) {
-            coord.playerVM.stepForward()
-            return .handled
-        }
-        .onKeyPress("j") {
-            coord.playerVM.shuttleReverse()
-            return .handled
-        }
-        .onKeyPress("k") {
-            coord.playerVM.shuttlePause()
-            return .handled
-        }
-        .onKeyPress("l") {
-            coord.playerVM.shuttleForward()
-            return .handled
-        }
+        // NOTE: All keyboard shortcuts are now handled by ShortcutEventHandler
+        // (a global NSEvent monitor installed in AppCoordinator.init).
+        // This ensures Space always triggers play/pause regardless of focus,
+        // and all shortcuts are dynamically remappable from the Keyboard Shortcuts panel.
+
         // MARK: - Sheets & Alerts
         .sheet(isPresented: $coord.showNewProject) {
             newProjectSheet
         }
         .sheet(isPresented: $showSettingsSheet) {
             settingsSheet
+        }
+        .sheet(isPresented: $coord.showKeyboardShortcuts) {
+            KeyboardShortcutsView()
         }
         .onChange(of: coord.showImportPanel) { _, show in
             if show {
@@ -96,7 +70,7 @@ struct ContentView: View {
 
     private func handleDelete() {
         guard let file = coordinator.projectVM.mediaFiles.first else { return }
-        if let editDecision = coordinator.transcriptVM.deleteSelectedWords(mediaFile: file) {
+        if coordinator.transcriptVM.deleteSelectedWords(mediaFile: file) != nil {
             let allDecisions = coordinator.transcriptVM.computeAllEditDecisions(
                 mediaFiles: coordinator.projectVM.mediaFiles
             )

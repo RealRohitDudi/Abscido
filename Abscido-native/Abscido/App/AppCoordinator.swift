@@ -10,6 +10,7 @@ final class AppCoordinator {
     var showExport = false
     var showXmlExport = false
     var showSettings = false
+    var showKeyboardShortcuts = false
     var errorMessage: String?
 
     let projectVM = ProjectViewModel()
@@ -17,6 +18,9 @@ final class AppCoordinator {
     let playerVM = PlayerViewModel()
     let timelineVM = TimelineViewModel()
     let aiVM = AIViewModel()
+
+    /// Global shortcut event handler — installed on first window appear.
+    private(set) var shortcutHandler: ShortcutEventHandler?
 
     init() {
         // Auto-create a default project if none exists
@@ -26,6 +30,10 @@ final class AppCoordinator {
         } else {
             projectVM.createProject(name: "Untitled Project")
         }
+
+        // Install global shortcut handler
+        shortcutHandler = ShortcutEventHandler(coordinator: self)
+        shortcutHandler?.install()
     }
 
     // MARK: - Coordinated Actions
