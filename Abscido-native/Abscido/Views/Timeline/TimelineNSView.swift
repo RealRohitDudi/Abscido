@@ -355,9 +355,16 @@ final class TimelineContentView: NSView, NSDraggingSource {
         gradientLayer.endPoint = CGPoint(x: 0.5, y: 1)
         clipLayer.addSublayer(gradientLayer)
 
-        if kind == .audio, let samples = waveformData[clip.mediaFileId], !samples.isEmpty {
-            let waveLayer = makeWaveformLayer(samples: samples, width: width, height: height - 4, color: color)
-            clipLayer.addSublayer(waveLayer)
+        if kind == .audio, let allSamples = waveformData[clip.mediaFileId], !allSamples.isEmpty {
+            // Slice samples to the clip's `sourceRange` so a Q-trimmed clip shows the *kept*
+            // portion of the file's waveform (the latter slice for Q, the former slice for E),
+            // not the whole file's waveform squashed into the new clip width — which is exactly
+            // what made Q look like it was cutting from the END of the clip.
+            let slicedSamples = waveformSlice(allSamples, sourceStartMs: clip.sourceStartMs, sourceDurationMs: clip.sourceDurationMs)
+            if !slicedSamples.isEmpty {
+                let waveLayer = makeWaveformLayer(samples: slicedSamples, width: width, height: height - 4, color: color)
+                clipLayer.addSublayer(waveLayer)
+            }
         }
 
         if width > 50 {
@@ -387,6 +394,18 @@ final class TimelineContentView: NSView, NSDraggingSource {
     }
 
     // MARK: - Waveform Layer
+
+    /// Returns the slice of `samples` corresponding to a clip's `[sourceStartMs, sourceStartMs+sourceDurationMs)`
+    /// window. The sample buffer is generated for the **full** media file at `WaveformGenerator.samplesPerSecondPublic`
+    /// samples per second; after a ripple-trim or razor we render only the kept portion.
+    private func waveformSlice(_ samples: [Float], sourceStartMs: Double, sourceDurationMs: Double) -> [Float] {
+        guard sourceDurationMs > 0, !samples.isEmpty else { return samples }
+        let samplesPerMs = Double(WaveformGenerator.samplesPerSecondPublic) / 1000.0
+        let startIdx = max(0, min(samples.count, Int((sourceStartMs * samplesPerMs).rounded())))
+        let endIdx = max(startIdx, min(samples.count, Int(((sourceStartMs + sourceDurationMs) * samplesPerMs).rounded())))
+        guard endIdx > startIdx else { return [] }
+        return Array(samples[startIdx..<endIdx])
+    }
 
     private func makeWaveformLayer(samples: [Float], width: CGFloat, height: CGFloat, color: NSColor) -> CAShapeLayer {
         let waveLayer = CAShapeLayer()

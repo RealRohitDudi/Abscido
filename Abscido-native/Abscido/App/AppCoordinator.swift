@@ -38,6 +38,38 @@ final class AppCoordinator {
         timelineVM.onRippleTrimSeekProgramMs = { [weak self] t in
             self?.playerVM.seek(to: t)
         }
+
+        // Every OTIO mutation (Q ripple-trim start, E ripple-trim end, razor, paste-at-playhead,
+        // move/insert, link/unlink, gap delete, manual edge trim, etc.) calls
+        // `timelineVM.onTimelineChanged`. Rebuilding the player composition from the current OTIO
+        // timeline here keeps the AVPlayer aligned with what the user sees on the timeline —
+        // otherwise a Q at playhead 3 s on a 10 s clip would shrink the clip to 7 s on the timeline
+        // but the player would keep playing the raw asset's full 10 s, making it look like the
+        // clip's TAIL got trimmed (the original `[0, 7s]` of source) instead of its HEAD.
+        timelineVM.onTimelineChanged = { [weak self] in
+            self?.rebuildPlayerCompositionFromTimeline()
+        }
+    }
+
+    private func rebuildPlayerCompositionFromTimeline() {
+        let mediaFiles = projectVM.mediaFiles
+        Task { [weak self] in
+            guard let self else { return }
+            guard let timeline = await self.timelineVM.otioEngine.currentTimeline() else { return }
+            do {
+                let composition = try await CompositionBuilder.build(
+                    from: timeline,
+                    mediaFiles: mediaFiles
+                )
+                await MainActor.run {
+                    self.playerVM.loadComposition(composition)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
     }
 
     // MARK: - Coordinated Actions

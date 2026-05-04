@@ -9,7 +9,12 @@ actor WaveformGenerator {
     private var cache: [String: [Float]] = [:]
 
     /// Target samples per second of audio for visualization.
+    /// Exposed (via `Self.samplesPerSecondPublic`) so the renderer can slice the cached
+    /// buffer to a clip's `sourceRange` after a Q/E/manual trim.
     private let samplesPerSecond: Int = 200
+
+    /// Public mirror of `samplesPerSecond` — keep in sync if the private constant changes.
+    static let samplesPerSecondPublic: Int = 200
 
     /// Generates waveform amplitude data for a media file.
     /// Returns normalized [Float] in 0...1 range.
