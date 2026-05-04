@@ -34,6 +34,7 @@ struct TimelineNSView: NSViewRepresentable {
     var pixelsPerSecond: Double
     var selectedClipIds: Set<String>
     var waveformRevision: Int
+    var timelineStructureRevision: Int
 
     init(timelineVM: TimelineViewModel, playerVM: PlayerViewModel, mediaFiles: [MediaFile]) {
         self.timelineVM = timelineVM
@@ -44,6 +45,7 @@ struct TimelineNSView: NSViewRepresentable {
         self.pixelsPerSecond = timelineVM.pixelsPerSecond
         self.selectedClipIds = timelineVM.selectedClipIds
         self.waveformRevision = timelineVM.waveformRevision
+        self.timelineStructureRevision = timelineVM.timelineStructureRevision
     }
 
     func makeNSView(context: Context) -> TimelineScrollContainer {
@@ -66,6 +68,7 @@ struct TimelineNSView: NSViewRepresentable {
             || coord.lastPixelsPerSecond != pixelsPerSecond
             || coord.lastSelectedClipIds != selectedClipIds
             || coord.lastWaveformRevision != waveformRevision
+            || coord.lastTimelineStructureRevision != timelineStructureRevision
 
         if needsRebuild {
             coord.lastTrackCount = trackCount
@@ -73,6 +76,7 @@ struct TimelineNSView: NSViewRepresentable {
             coord.lastPixelsPerSecond = pixelsPerSecond
             coord.lastSelectedClipIds = selectedClipIds
             coord.lastWaveformRevision = waveformRevision
+            coord.lastTimelineStructureRevision = timelineStructureRevision
             coord.rebuildLayers()
         }
 
@@ -130,8 +134,10 @@ class TimelineScrollContainer: NSView {
             scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
         ])
 
-        // Register for ALL URL pasteboard types — SwiftUI .onDrag, Finder, and .draggable all use different types
+        // Register for ALL URL pasteboard types — SwiftUI .onDrag, Finder, and .draggable all use different types,
+        // plus intra-timeline clip drags (`NSDraggingSource` on `TimelineContentView`).
         contentView.registerForDraggedTypes([
+            TimelineCoordinator.timelineClipPasteboardType,
             .fileURL,
             .URL,
             NSPasteboard.PasteboardType("public.file-url"),
@@ -151,7 +157,7 @@ class TimelineScrollContainer: NSView {
 
 // MARK: - Content View (draws tracks + clips via CALayers)
 
-class TimelineContentView: NSView {
+final class TimelineContentView: NSView, NSDraggingSource {
     weak var coordinator: TimelineCoordinator?
 
     let trackHeaderWidth: CGFloat = 60
@@ -623,12 +629,21 @@ class TimelineContentView: NSView {
     override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
         true
     }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        context == .outsideApplication ? [] : [.move]
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool { true }
 }
 
 // MARK: - Coordinator
 
 @MainActor
 class TimelineCoordinator: NSObject {
+    /// Internal drag: moving a clip between positions / tracks (see `beginInternalClipDragging`).
+    static let timelineClipPasteboardType = NSPasteboard.PasteboardType("com.abscido.timeline-clip")
+
     var timelineVM: TimelineViewModel
     var playerVM: PlayerViewModel
     var mediaFiles: [MediaFile]
@@ -640,6 +655,7 @@ class TimelineCoordinator: NSObject {
     var lastPixelsPerSecond: Double = -1
     var lastSelectedClipIds: Set<String> = []
     var lastWaveformRevision: Int = -1
+    var lastTimelineStructureRevision: Int = -1
 
     private var basePixelsPerSecond: Double = 100
     private var pinchAnchorTimeMs: Double?
@@ -854,13 +870,90 @@ class TimelineCoordinator: NSObject {
     private var marqueeBaseSelection: Set<String> = []
     private var marqueeMoved: Bool = false
 
+    private enum TrimDragKind {
+        case start(
+            trackIndex: Int,
+            clipIndex: Int,
+            anchorTimelineX: CGFloat,
+            initialSourceStartMs: Double,
+            clipAbsoluteSourceEndMs: Double
+        )
+        case end(
+            trackIndex: Int,
+            clipIndex: Int,
+            anchorTimelineX: CGFloat,
+            sourceStartMs: Double,
+            initialSourceEndMs: Double,
+            mediaAbsoluteEndMs: Double
+        )
+    }
+
+    private var trimDrag: TrimDragKind?
+    /// After a clip-body click, user either drags (> few pt) to reposition, or releases to seek under the click.
+    private var pendingClipBodyAction: (trackIndex: Int, clipIndex: Int, startDoc: CGPoint, timelineMsUnderClick: Double)?
+    private var suppressSeekForLaneClick: Bool = false
+
+    private enum ClipEdgeHit {
+        case none, leading, trailing
+    }
+
+    private func hitTestTrimEdge(clip: TimelineViewModel.TimelineClipModel, timelineCoordinateX clipX: CGFloat) -> ClipEdgeHit {
+        let pps = timelineVM.pixelsPerSecond
+        let cStart = CGFloat(clip.startMs / 1000.0 * pps)
+        let cEnd = CGFloat((clip.startMs + clip.durationMs) / 1000.0 * pps)
+        let edgeThreshold: CGFloat = 6
+        if abs(clipX - cStart) <= edgeThreshold { return .leading }
+        if abs(clipX - cEnd) <= edgeThreshold { return .trailing }
+        return .none
+    }
+
+    private func trackIndexAtContentY(_ y: CGFloat, cv: TimelineContentView) -> Int? {
+        var currentY = cv.rulerHeight
+        for track in timelineVM.tracks {
+            let tHeight = timelineVM.trackHeights[track.trackIndex] ?? cv.trackHeight
+            if y >= currentY && y < currentY + tHeight { return track.trackIndex }
+            currentY += tHeight
+        }
+        return nil
+    }
+
+    private func beginInternalClipDragging(fromTrack: Int, fromIndex: Int, event: NSEvent) {
+        guard let cv = container?.contentView else { return }
+
+        let pbItem = NSPasteboardItem()
+        pbItem.setPropertyList(
+            ["fromTrack": fromTrack, "fromIndex": fromIndex],
+            forType: Self.timelineClipPasteboardType
+        )
+
+        let item = NSDraggingItem(pasteboardWriter: pbItem)
+        let size = NSSize(width: 120, height: 36)
+        let img = NSImage(size: size)
+        img.lockFocus()
+        NSColor(calibratedWhite: 0.25, alpha: 0.92).setFill()
+        NSBezierPath(roundedRect: NSRect(origin: .zero, size: size), xRadius: 4, yRadius: 4).fill()
+        img.unlockFocus()
+
+        let pDoc = cv.convert(event.locationInWindow, from: nil)
+        item.draggingFrame = NSRect(x: pDoc.x - size.width / 2, y: pDoc.y - size.height / 2, width: size.width, height: size.height)
+        item.imageComponentsProvider = {
+            let c = NSDraggingImageComponent(key: .icon)
+            c.contents = img
+            c.frame = NSRect(origin: .zero, size: size)
+            return [c]
+        }
+
+        cv.beginDraggingSession(with: [item], event: event, source: cv)
+    }
+
     func handleMouseDown(at location: CGPoint, event: NSEvent) {
         guard let cv = container?.contentView else { return }
         // Take keyboard focus so `ShortcutEventHandler` treats targets as timeline, not transcript.
         cv.window?.makeFirstResponder(cv)
 
-        // Any click outside clips should deselect (unless user is additive selecting with ⌘).
-        // We'll still allow click-to-seek on ruler, but it should clear selection.
+        trimDrag = nil
+        pendingClipBodyAction = nil
+        suppressSeekForLaneClick = false
 
         // ── Ruler area: start playhead scrubbing immediately ──────────────────
         if location.y < cv.rulerHeight {
@@ -925,26 +1018,61 @@ class TimelineCoordinator: NSObject {
         if location.x > cv.trackHeaderWidth {
             let clipX = location.x - cv.trackHeaderWidth
 
-            // Lane click on a clip row → select / scrub; empty lane OR gutter below tracks → marquee
+            // Lane click on a clip row → trim / clip-drag / marquee; empty lane OR gutter below tracks → marquee
             if clickBelowTracks {
                 beginMarquee(at: location)
             } else if foundTrackIndex != -1 {
                 if let clip = timelineVM.clipAt(trackIndex: foundTrackIndex, x: clipX) {
-                    timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
-                    isScrubbing = true
+                    if clip.color == .gap {
+                        // Gaps participate in marquee and delete-as-ripple; click alone selects without seeking.
+                        timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
+                        suppressSeekForLaneClick = true
+                    } else {
+                        let edge = hitTestTrimEdge(clip: clip, timelineCoordinateX: clipX)
+                        let absSourceEndMs = clip.sourceStartMs + clip.sourceDurationMs
+                        let mediaEndCap = mediaFiles.first { $0.id == clip.mediaFileId }?.durationMs ?? (absSourceEndMs + 60_000)
+
+                        switch edge {
+                        case .leading:
+                            timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
+                            trimDrag = .start(
+                                trackIndex: foundTrackIndex,
+                                clipIndex: clip.clipIndex,
+                                anchorTimelineX: clipX,
+                                initialSourceStartMs: clip.sourceStartMs,
+                                clipAbsoluteSourceEndMs: absSourceEndMs
+                            )
+                            suppressSeekForLaneClick = true
+
+                        case .trailing:
+                            timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
+                            trimDrag = .end(
+                                trackIndex: foundTrackIndex,
+                                clipIndex: clip.clipIndex,
+                                anchorTimelineX: clipX,
+                                sourceStartMs: clip.sourceStartMs,
+                                initialSourceEndMs: absSourceEndMs,
+                                mediaAbsoluteEndMs: max(mediaEndCap, absSourceEndMs + 100)
+                            )
+                            suppressSeekForLaneClick = true
+
+                        case .none:
+                            timelineVM.selectClip(clip.id, exclusive: !event.modifierFlags.contains(.command))
+                            let tHover = timelineVM.xToMs(clipX)
+                            let underClick = min(max(tHover, clip.startMs), clip.startMs + clip.durationMs - 0.5)
+                            pendingClipBodyAction = (
+                                trackIndex: foundTrackIndex,
+                                clipIndex: clip.clipIndex,
+                                startDoc: location,
+                                timelineMsUnderClick: underClick
+                            )
+                        }
+                    }
                 } else {
                     beginMarquee(at: location)
                 }
             }
 
-            // If we clicked an actual clip, behave like normal click-to-seek/scrub.
-            if foundTrackIndex != -1, timelineVM.clipAt(trackIndex: foundTrackIndex, x: clipX) != nil,
-               !clickBelowTracks,
-               !isMarqueeSelecting {
-                let ms = min(timelineVM.xToMs(clipX), timelineVM.totalDurationMs)
-                playerVM.seek(to: ms)
-                cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
-            }
             rebuildLayers()
             return
         }
@@ -976,6 +1104,37 @@ class TimelineCoordinator: NSObject {
             return
         }
 
+        // ── Trim clip head / tail ────────────────────────────────────────────
+        if let td = trimDrag {
+            guard loc.x > cv.trackHeaderWidth else { return }
+            let clipXD = loc.x - cv.trackHeaderWidth
+            let pps = timelineVM.pixelsPerSecond
+            switch td {
+            case .start(let trackIndex, let clipIndex, let anchorX, let initialStart, let sourceEnd):
+                let deltaMs = Double(clipXD - anchorX) / pps * 1000.0
+                let newStart = max(0, min(initialStart + deltaMs, sourceEnd - 100))
+                timelineVM.trimClipStart(trackIndex: trackIndex, clipIndex: clipIndex, newStartMs: newStart)
+            case .end(let trackIndex, let clipIndex, let anchorX, let sourceStart, let initialEnd, let mediaCap):
+                let deltaMs = Double(clipXD - anchorX) / pps * 1000.0
+                let newEnd = min(max(initialEnd + deltaMs, sourceStart + 100), mediaCap)
+                timelineVM.trimClipEnd(trackIndex: trackIndex, clipIndex: clipIndex, newEndMs: newEnd)
+            }
+            rebuildLayers()
+            return
+        }
+
+        // ── Begin internal clip move (drag in tracks) ───────────────────────
+        if pendingClipBodyAction != nil {
+            if let p = pendingClipBodyAction {
+                let dist = hypot(loc.x - p.startDoc.x, loc.y - p.startDoc.y)
+                if dist > 6 {
+                    beginInternalClipDragging(fromTrack: p.trackIndex, fromIndex: p.clipIndex, event: event)
+                    pendingClipBodyAction = nil
+                }
+            }
+            return
+        }
+
         // ── Marquee selection ────────────────────────────────────────────────
         if isMarqueeSelecting {
             let rect = normalizedRect(from: marqueeStart, to: loc)
@@ -1003,11 +1162,22 @@ class TimelineCoordinator: NSObject {
     }
 
     func handleMouseUp(with event: NSEvent) {
+        defer { suppressSeekForLaneClick = false }
+
+        if let cv = container?.contentView, let p = pendingClipBodyAction {
+            let ms = min(max(0, p.timelineMsUnderClick), timelineVM.totalDurationMs)
+            playerVM.seek(to: ms)
+            cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+            pendingClipBodyAction = nil
+        }
+
+        trimDrag = nil
+
         if isMarqueeSelecting {
-            // Treat a tiny marquee as a click-to-seek on empty space.
+            // Treat a tiny marquee as a click-to-seek on empty timeline space (but not after gap/trim hits).
             if !marqueeMoved, let cv = container?.contentView {
                 let loc = cv.convert(event.locationInWindow, from: nil)
-                if loc.x > cv.trackHeaderWidth {
+                if loc.x > cv.trackHeaderWidth, !suppressSeekForLaneClick {
                     let ms = min(timelineVM.xToMs(loc.x - cv.trackHeaderWidth), timelineVM.totalDurationMs)
                     playerVM.seek(to: ms)
                     cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
@@ -1051,7 +1221,7 @@ class TimelineCoordinator: NSObject {
             let tHeight = timelineVM.trackHeights[track.trackIndex] ?? cv.trackHeight
             let trackRect = CGRect(x: cv.trackHeaderWidth, y: currentY, width: cv.frame.width - cv.trackHeaderWidth, height: tHeight)
             if rect.intersects(trackRect) {
-                for clip in track.clips where clip.color != .gap {
+                for clip in track.clips {
                     let clipX = cv.trackHeaderWidth + CGFloat(clip.startMs / 1000.0 * timelineVM.pixelsPerSecond)
                     let clipW = max(2, CGFloat(clip.durationMs / 1000.0 * timelineVM.pixelsPerSecond))
                     let clipRect = CGRect(x: clipX, y: currentY + 2, width: clipW, height: tHeight - 4)
@@ -1070,6 +1240,8 @@ class TimelineCoordinator: NSObject {
 
     func cursorForLocation(_ location: CGPoint) -> NSCursor {
         guard let cv = container?.contentView else { return .arrow }
+
+        if trimDrag != nil { return .resizeLeftRight }
 
         // Track boundary resize handles (header edges).
         var currentY = cv.rulerHeight
@@ -1166,31 +1338,43 @@ class TimelineCoordinator: NSObject {
         return menu
     }
 
-    @objc func cutAction() { timelineVM.cutSelected(); rebuildLayers() }
+    @objc func cutAction() { timelineVM.cutSelected() }
     @objc func copyAction() { timelineVM.copySelected() }
-    @objc func pasteAction() { timelineVM.pasteAtPlayhead(); rebuildLayers() }
-    @objc func deleteAction() { timelineVM.deleteSelected(); rebuildLayers() }
+    @objc func pasteAction() { timelineVM.pasteAtPlayhead() }
+    @objc func deleteAction() { timelineVM.deleteSelected() }
     @objc func linkAction() {
         guard timelineVM.canLinkSelectedClips else { return }
-        timelineVM.linkSelected(); rebuildLayers()
+        timelineVM.linkSelected()
     }
     @objc func unlinkAction() {
         guard timelineVM.canUnlinkSelectedClips else { return }
-        timelineVM.unlinkSelected(); rebuildLayers()
+        timelineVM.unlinkSelected()
     }
-    @objc func addVideoTrack() { timelineVM.addTrack(kind: .video); rebuildLayers() }
-    @objc func addAudioTrack() { timelineVM.addTrack(kind: .audio); rebuildLayers() }
+    @objc func addVideoTrack() { timelineVM.addTrack(kind: .video) }
+    @objc func addAudioTrack() { timelineVM.addTrack(kind: .audio) }
 
     // MARK: - Drop Handler
 
     func handleDrop(at location: CGPoint, info: NSDraggingInfo) -> Bool {
         guard let cv = container?.contentView else { return false }
 
+        let pb = info.draggingPasteboard
+
+        // Intra-timeline clip move (started from `beginInternalClipDragging`).
+        if let plist = pb.propertyList(forType: Self.timelineClipPasteboardType) as? [String: Any],
+           let fromTrack = plist["fromTrack"] as? Int,
+           let fromIndex = plist["fromIndex"] as? Int {
+            let dropX = max(0, location.x - cv.trackHeaderWidth)
+            let timeMs = timelineVM.xToMs(dropX)
+            guard let toTrack = trackIndexAtContentY(location.y, cv: cv) else { return false }
+            timelineVM.moveClip(fromTrack: fromTrack, fromIndex: fromIndex, toTrack: toTrack, toTimeMs: timeMs)
+            rebuildLayers()
+            return true
+        }
+
         let dropX = max(0, location.x - cv.trackHeaderWidth)
         let timeMs = timelineVM.xToMs(dropX)
         var droppedFile: MediaFile?
-
-        let pb = info.draggingPasteboard
         
         // Debug: print all available types so we know exactly what the drag source provided
         print("[Drop] Available pasteboard types: \(pb.types ?? [])")
@@ -1318,6 +1502,7 @@ class TimelineCoordinator: NSObject {
         // Must use availableType(from:) which only checks type identifiers.
         let pb = info.draggingPasteboard
         return pb.availableType(from: [
+            Self.timelineClipPasteboardType,
             .fileURL,
             .URL,
             NSPasteboard.PasteboardType("public.file-url"),

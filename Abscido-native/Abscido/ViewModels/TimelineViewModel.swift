@@ -54,6 +54,10 @@ final class TimelineViewModel {
     /// when async waveform generation finished (so it can rebuild layers).
     var waveformRevision: Int = 0
 
+    /// Bumps on every `refreshFromEngine` so the AppKit timeline can rebuild even when
+    /// `totalDurationMs` is unchanged (e.g. deleting all audio while video still sets max duration).
+    var timelineStructureRevision: Int = 0
+
     /// Callback to notify parent when timeline changes require composition rebuild.
     var onTimelineChanged: (() -> Void)?
 
@@ -165,11 +169,17 @@ final class TimelineViewModel {
     // MARK: - Selection
 
     /// Expand any clip IDs to include all timeline clips sharing their `linkGroupId`.
+    ///
+    /// A linked group represents *one logical clip occupying the same timeline position across
+    /// different tracks* (e.g. V1+A1 from a single import). Two clips on the SAME track at
+    /// different positions can never be linked partners — so the expansion only crosses to OTHER
+    /// tracks. Without this guard, a leaked duplicate `linkGroupId` (e.g. from a split clip) would
+    /// pull a same-track sibling into the selection and cause "delete the next clip too" bugs.
     private func expandedSelectionIncludingLinkedPartners(_ ids: Set<String>) -> Set<String> {
         var result = ids
         for clip in clips {
             guard ids.contains(clip.id), let lg = clip.linkGroupId else { continue }
-            for c in clips where c.linkGroupId == lg {
+            for c in clips where c.linkGroupId == lg && c.trackIndex != clip.trackIndex {
                 result.insert(c.id)
             }
         }
@@ -177,10 +187,12 @@ final class TimelineViewModel {
     }
 
     /// Clip IDs forming one linked partition (whole link group when linked, otherwise just that clip).
+    /// Same-track partners are excluded for the same reason as `expandedSelectionIncludingLinkedPartners`.
     private func idsToRemoveWhenDeselecting(clipId: String) -> Set<String> {
         guard let clip = clips.first(where: { $0.id == clipId }) else { return [clipId] }
         guard let lg = clip.linkGroupId else { return [clipId] }
-        return Set(clips.filter { $0.linkGroupId == lg }.map(\.id))
+        let partners = clips.filter { $0.linkGroupId == lg && $0.trackIndex != clip.trackIndex }.map(\.id)
+        return Set([clipId] + partners)
     }
 
     func selectClip(_ clipId: String, exclusive: Bool = true) {
@@ -240,40 +252,58 @@ final class TimelineViewModel {
         }
     }
 
+    /// Slot keys for `OTIOEngine.applyLiftRippleRemoval` — selected **media clips** plus **cross-track**
+    /// linked partners only (lift mode). Never adds same-track neighbors, so a leaked duplicate
+    /// `linkGroupId` on one track cannot wipe the whole row.
+    private func explicitLiftSlots(forClips deletableClips: [TimelineClipModel]) -> Set<String> {
+        var slots = Set(deletableClips.map { "\($0.trackIndex)_\($0.clipIndex)" })
+        for clip in deletableClips {
+            guard let lg = clip.linkGroupId else { continue }
+            for other in clips where other.linkGroupId == lg && other.trackIndex != clip.trackIndex {
+                slots.insert("\(other.trackIndex)_\(other.clipIndex)")
+            }
+        }
+        return slots
+    }
+
     // MARK: - Delete
 
     func deleteSelected() {
-        Task {
-            let selected = selectedClips()
-            guard !selected.isEmpty else { return }
+        // Resolve the selection → slot keys synchronously on the main actor, then clear the
+        // selection BEFORE kicking off the async engine call.
+        //
+        // The Delete shortcut is dispatched twice on every press: once by the SwiftUI
+        // `CommandGroup` `.keyboardShortcut(.delete)` in `AbscidoApp` and once by
+        // `ShortcutEventHandler`'s `NSEvent.addLocalMonitorForEvents`. Without this synchronous
+        // clear, both dispatches start a `Task`, both see the same `selectedClipIds`, both
+        // compute the same slot key (e.g. `"1_0"` for the first audio clip), and both call
+        // `applyDeletion`. The second pass runs after the first has already shrunk the track
+        // and ends up deleting whatever clip slid into slot index 0 — exactly the "deleting
+        // one audio clip also kills the next one" symptom.
+        //
+        // Capturing + clearing inside the @MainActor synchronous prologue means the duplicate
+        // dispatch lands on an empty `selectedClipIds`, exits via the `isEmpty` guard, and only
+        // one engine deletion runs.
+        let selected = selectedClips()
+        guard !selected.isEmpty else { return }
 
-            // Gaps are empty placeholder space. Removing one would re-flow every following clip on
-            // that track to the left, which the user reads as "the next clip got deleted too".
-            // Standard NLE "lift" behavior: deleting empty space is a no-op — drop gaps from the
-            // delete set so subsequent clips keep their timeline positions.
-            let deletableClips = selected.filter { $0.color != .gap }
-            guard !deletableClips.isEmpty else {
-                selectedClipIds.removeAll()
-                updateSelectionState()
-                return
-            }
+        let clipItems = selected.filter { $0.color != .gap }
+        let gapItems = selected.filter { $0.color == .gap }
 
-            // One atomic pass avoids stale `(trackIndex, clipIndex)` when both halves of a linked
-            // clip pair are selected: calling `deleteLinkedClips` twice used to remove index 0 twice
-            // on the video track — deleting the wrong (next) clip after the linked pair vanished.
-            let removeLinkGroups = Set(deletableClips.compactMap(\.linkGroupId))
-            let explicitSlots = Set(
-                deletableClips
-                    .filter { $0.linkGroupId == nil }
-                    .map { "\($0.trackIndex)_\($0.clipIndex)" }
-            )
-
-            await otioEngine.applyDeletion(
-                removeLinkGroupIds: removeLinkGroups,
-                explicitRemoveSlotKeys: explicitSlots
-            )
-
+        guard !clipItems.isEmpty || !gapItems.isEmpty else {
             selectedClipIds.removeAll()
+            updateSelectionState()
+            return
+        }
+
+        let liftSlots: Set<String> = clipItems.isEmpty ? Set() : explicitLiftSlots(forClips: clipItems)
+        let rippleSlots = Set(gapItems.map { "\($0.trackIndex)_\($0.clipIndex)" })
+
+        selectedClipIds.removeAll()
+        updateSelectionState()
+
+        Task {
+            await otioEngine.applyLiftRippleRemoval(liftClipSlotKeys: liftSlots, rippleRemoveSlotKeys: rippleSlots)
             await refreshFromEngine()
             onTimelineChanged?()
         }
@@ -493,5 +523,6 @@ final class TimelineViewModel {
 
         self.tracks = newTracks
         self.totalDurationMs = maxDuration
+        timelineStructureRevision &+= 1
     }
 }

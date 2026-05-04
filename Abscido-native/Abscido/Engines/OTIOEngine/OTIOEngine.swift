@@ -99,8 +99,11 @@ actor OTIOEngine {
         )
 
         // Place at exact timeline time (split gaps/clips, pad with gap after track end) — no ripple insert.
-        overwriteInTrack(&tl.tracks[videoTrackIndex], clip: videoClip, atTimeMs: timeMs, durationMs: sourceRange.durationMs)
-        overwriteInTrack(&tl.tracks[audioTrackIndex], clip: audioClip, atTimeMs: timeMs, durationMs: sourceRange.durationMs)
+        // One shared remap so V's right-half and A's right-half of any split clip wind up linked
+        // to each other (same fresh id) instead of to their LEFT halves on the same track.
+        var splitLinkRemap: [String: String] = [:]
+        overwriteInTrack(&tl.tracks[videoTrackIndex], clip: videoClip, atTimeMs: timeMs, durationMs: sourceRange.durationMs, splitLinkRemap: &splitLinkRemap)
+        overwriteInTrack(&tl.tracks[audioTrackIndex], clip: audioClip, atTimeMs: timeMs, durationMs: sourceRange.durationMs, splitLinkRemap: &splitLinkRemap)
         self.timeline = tl
     }
 
@@ -141,8 +144,9 @@ actor OTIOEngine {
             linkGroupId: linkId
         )
 
-        overwriteInTrack(&tl.tracks[videoTrackIndex], clip: videoClip, atTimeMs: timeMs, durationMs: newDurationMs)
-        overwriteInTrack(&tl.tracks[audioTrackIndex], clip: audioClip, atTimeMs: timeMs, durationMs: newDurationMs)
+        var splitLinkRemap: [String: String] = [:]
+        overwriteInTrack(&tl.tracks[videoTrackIndex], clip: videoClip, atTimeMs: timeMs, durationMs: newDurationMs, splitLinkRemap: &splitLinkRemap)
+        overwriteInTrack(&tl.tracks[audioTrackIndex], clip: audioClip, atTimeMs: timeMs, durationMs: newDurationMs, splitLinkRemap: &splitLinkRemap)
         self.timeline = tl
     }
 
@@ -188,6 +192,7 @@ actor OTIOEngine {
                 }
             }
         }
+        var splitLinkRemap: [String: String] = [:]
         for (ti, var clip) in extracted {
             let rate = clip.sourceRange.startTime.rate
             let clampedDur = min(clip.sourceRange.durationMs, referenceDurationMs)
@@ -196,12 +201,26 @@ actor OTIOEngine {
                 startTime: clip.sourceRange.startTime,
                 duration: OTIOTime.fromMs(clampedDur, rate: rate)
             )
-            overwriteInTrack(&timeline.tracks[ti], clip: clip, atTimeMs: referenceStartMs, durationMs: referenceDurationMs)
+            overwriteInTrack(&timeline.tracks[ti], clip: clip, atTimeMs: referenceStartMs, durationMs: referenceDurationMs, splitLinkRemap: &splitLinkRemap)
         }
     }
 
     /// Non-destructive placement: clip starts at `atTimeMs`, splits gaps/clips, pads with leading gap if past track end.
-    private func overwriteInTrack(_ track: inout OTIOTrack, clip: OTIOClip, atTimeMs: Double, durationMs: Double) {
+    ///
+    /// `splitLinkRemap` maps an existing `linkGroupId → freshly minted linkGroupId` for the
+    /// **right half** of any clip that gets split by the overwrite window. Threading the same
+    /// map across the V/A calls of one operation keeps V's right-half linked to A's right-half
+    /// (they get the same new id) while still breaking the (incorrect) link to the LEFT halves
+    /// that remain on the same track. Without this, both halves of a split clip kept the same
+    /// `linkGroupId`, so deleting one half also deleted its same-track sibling — the reported
+    /// "deleting one audio clip also deletes the next one" bug.
+    private func overwriteInTrack(
+        _ track: inout OTIOTrack,
+        clip: OTIOClip,
+        atTimeMs: Double,
+        durationMs: Double,
+        splitLinkRemap: inout [String: String]
+    ) {
         let startMs = max(0, atTimeMs)
         let endMs = startMs + max(0, durationMs)
         let original = track.children
@@ -237,10 +256,10 @@ actor OTIOEngine {
                 continue
             }
 
-            // Overlaps overwrite window
+            // Overlaps overwrite window — left half keeps original linkGroupId
             if itemStart < startMs {
                 let leftDur = startMs - itemStart
-                if let leftItem = trimmedItem(item, keepStartOffsetMs: 0, keepDurationMs: leftDur) {
+                if let leftItem = trimmedItem(item, keepStartOffsetMs: 0, keepDurationMs: leftDur, overrideLinkGroupId: nil) {
                     newChildren.append(leftItem)
                 }
             }
@@ -250,10 +269,12 @@ actor OTIOEngine {
                 inserted = true
             }
 
+            // Right half gets a remapped linkGroupId (shared across tracks via splitLinkRemap)
             if itemEnd > endMs {
                 let rightStartOffset = endMs - itemStart
                 let rightDur = itemEnd - endMs
-                if let rightItem = trimmedItem(item, keepStartOffsetMs: rightStartOffset, keepDurationMs: rightDur) {
+                let remapped = remappedLinkIdForRightHalf(of: item, remap: &splitLinkRemap)
+                if let rightItem = trimmedItem(item, keepStartOffsetMs: rightStartOffset, keepDurationMs: rightDur, overrideLinkGroupId: remapped) {
                     newChildren.append(rightItem)
                 }
             }
@@ -271,7 +292,29 @@ actor OTIOEngine {
         track.children = newChildren
     }
 
-    private func trimmedItem(_ item: OTIOItem, keepStartOffsetMs: Double, keepDurationMs: Double) -> OTIOItem? {
+    /// Looks up (or mints) a fresh `linkGroupId` for the right half of a clip that's about to be
+    /// split. `remap` is shared between the V/A passes of a single operation so that, when the
+    /// same source clip is split symmetrically on both tracks, the two right halves wind up with
+    /// the same new id and remain linked across tracks. Returns `nil` for gaps and for clips
+    /// that didn't have a `linkGroupId` to begin with — nothing to remap.
+    private func remappedLinkIdForRightHalf(of item: OTIOItem, remap: inout [String: String]) -> String? {
+        guard case .clip(let c) = item, let oldLg = c.linkGroupId else { return nil }
+        if let cached = remap[oldLg] { return cached }
+        let fresh = UUID().uuidString
+        remap[oldLg] = fresh
+        return fresh
+    }
+
+    /// Trims an item to a sub-range. When `overrideLinkGroupId` is non-nil and the item is a clip,
+    /// the returned clip's `linkGroupId` is replaced with that value — used to give the right half
+    /// of a split a fresh shared id so it doesn't stay linked to its left-half sibling on the same
+    /// track. Passing `nil` keeps whatever `linkGroupId` the source already had.
+    private func trimmedItem(
+        _ item: OTIOItem,
+        keepStartOffsetMs: Double,
+        keepDurationMs: Double,
+        overrideLinkGroupId: String?
+    ) -> OTIOItem? {
         guard keepDurationMs > 0.5 else { return nil }
 
         switch item {
@@ -282,6 +325,9 @@ actor OTIOEngine {
             let newDuration = OTIOTime.fromMs(keepDurationMs, rate: rate)
             var newClip = c
             newClip.sourceRange = OTIOTimeRange(startTime: newStartTime, duration: newDuration)
+            if let override = overrideLinkGroupId {
+                newClip.linkGroupId = override
+            }
             return .clip(newClip)
 
         case .gap(let g):
@@ -334,37 +380,76 @@ actor OTIOEngine {
         self.timeline = tl
     }
 
-    /// Atomic multi-delete driven by timeline selection snapshots.
+    /// Applies two removal modes in **one index space** (`"\(trackIndex)_\(clipIndex)"` referring to the
+    /// timeline rows **before** this call):
     ///
-    /// Indices `"\(trackIndex)_\(clipIndex)"` refer to the timeline **before** any removal (single pass).
-    /// Every clip matching `removeLinkGroupIds` is stripped from **all** tracks (linked A/V deletes once).
-    /// Non-linked clips and gaps appear only under `explicitRemoveSlotKeys` (clips with nil `linkGroupId`).
-    func applyDeletion(removeLinkGroupIds: Set<String>, explicitRemoveSlotKeys: Set<String>) {
+    /// - **`liftClipSlotKeys`**: remove each **clip**, replacing its timeline span with an empty Gap
+    ///   of identical duration (`lift` semantics from an NLE) so later clips retain their timeline
+    ///   offsets.
+    /// - **`rippleRemoveSlotKeys`**: remove each referenced **item** outright (clips or gaps): used
+    ///   for gap deletion (`ripple`/close empty space).
+    ///
+    /// After removals, consecutive gaps on each track are coalesced to keep OTIO stacks tidy.
+    func applyLiftRippleRemoval(liftClipSlotKeys: Set<String>, rippleRemoveSlotKeys: Set<String>) {
         guard var tl = timeline else { return }
 
         for ti in tl.tracks.indices {
-            tl.tracks[ti].children = tl.tracks[ti].children.enumerated().compactMap { (ci, item) -> OTIOItem? in
-                switch item {
-                case .clip(let c):
-                    if let lgId = c.linkGroupId, removeLinkGroupIds.contains(lgId) {
-                        return nil
+            var newChildren: [OTIOItem] = []
+
+            for (ci, item) in tl.tracks[ti].children.enumerated() {
+                let key = "\(ti)_\(ci)"
+                if liftClipSlotKeys.contains(key) {
+                    if case .clip(let c) = item {
+                        newChildren.append(
+                            gapItem(rate: c.sourceRange.startTime.rate, durationMs: c.sourceRange.durationMs)
+                        )
+                    } else if case .gap = item {
+                        // Shouldn't combine lift on a gap, but tolerate by keeping the gap.
+                        newChildren.append(item)
                     }
-                    let key = "\(ti)_\(ci)"
-                    if explicitRemoveSlotKeys.contains(key) {
-                        return nil
-                    }
-                    return item
-                case .gap:
-                    let key = "\(ti)_\(ci)"
-                    if explicitRemoveSlotKeys.contains(key) {
-                        return nil
-                    }
-                    return item
+                    continue
                 }
+                if rippleRemoveSlotKeys.contains(key) {
+                    continue
+                }
+                newChildren.append(item)
             }
+
+            tl.tracks[ti].children = newChildren
+            coalesceAdjacentGaps(in: &tl.tracks[ti])
         }
 
         self.timeline = tl
+    }
+
+    private func coalesceAdjacentGaps(in track: inout OTIOTrack) {
+        guard track.children.count > 1 else { return }
+
+        var out: [OTIOItem] = []
+        out.reserveCapacity(track.children.count)
+
+        for item in track.children {
+            guard case .gap(let gAdded) = item else {
+                out.append(item)
+                continue
+            }
+            guard let last = out.last else {
+                out.append(item)
+                continue
+            }
+            if case .gap(let gPrev) = last {
+                let rate = gPrev.sourceRange.duration.rate
+                let combinedMs = gPrev.sourceRange.durationMs + gAdded.sourceRange.durationMs
+                let mergedGap = OTIOGap(sourceRange: OTIOTimeRange(
+                    startTime: gPrev.sourceRange.startTime,
+                    duration: OTIOTime.fromMs(combinedMs, rate: rate)
+                ))
+                out[out.count - 1] = .gap(mergedGap)
+            } else {
+                out.append(item)
+            }
+        }
+        track.children = out
     }
 
     // MARK: - Trim
@@ -496,13 +581,14 @@ actor OTIOEngine {
     func pasteClips(atTimeMs timeMs: Double) {
         guard var tl = timeline, !clipboard.isEmpty else { return }
 
+        var splitLinkRemap: [String: String] = [:]
         for entry in clipboard {
             var clip = entry.clip
             clip.linkGroupId = UUID().uuidString // New link IDs for pasted clips
 
             if let trackIndex = tl.tracks.firstIndex(where: { $0.kind == entry.trackKind }) {
                 let d = clip.sourceRange.durationMs
-                overwriteInTrack(&tl.tracks[trackIndex], clip: clip, atTimeMs: timeMs, durationMs: d)
+                overwriteInTrack(&tl.tracks[trackIndex], clip: clip, atTimeMs: timeMs, durationMs: d, splitLinkRemap: &splitLinkRemap)
             }
         }
 
@@ -519,6 +605,7 @@ actor OTIOEngine {
 
         guard case .clip(let moved) = tl.tracks[fromTrack].children[fromIndex] else { return }
 
+        var splitLinkRemap: [String: String] = [:]
         if let lg = moved.linkGroupId {
             var extracted: [(Int, OTIOClip)] = []
             for ti in tl.tracks.indices {
@@ -531,13 +618,13 @@ actor OTIOEngine {
             }
             for (ti, clip) in extracted.sorted(by: { $0.0 < $1.0 }) {
                 let d = clip.sourceRange.durationMs
-                overwriteInTrack(&tl.tracks[ti], clip: clip, atTimeMs: toTimeMs, durationMs: d)
+                overwriteInTrack(&tl.tracks[ti], clip: clip, atTimeMs: toTimeMs, durationMs: d, splitLinkRemap: &splitLinkRemap)
             }
         } else {
             let item = tl.tracks[fromTrack].children.remove(at: fromIndex)
             if case .clip(let clip) = item, toTrack < tl.tracks.count {
                 let d = clip.sourceRange.durationMs
-                overwriteInTrack(&tl.tracks[toTrack], clip: clip, atTimeMs: toTimeMs, durationMs: d)
+                overwriteInTrack(&tl.tracks[toTrack], clip: clip, atTimeMs: toTimeMs, durationMs: d, splitLinkRemap: &splitLinkRemap)
             }
         }
 
@@ -578,6 +665,12 @@ actor OTIOEngine {
 
         let fileMap = Dictionary(uniqueKeysWithValues: mediaFiles.map { ($0.id, $0) })
 
+        /// One fresh `linkGroupId` per kept **segment** (ripple range), shared by every track that
+        /// processes the same `mediaFileId` so V1↔A1 stay paired. Reusing `firstClip.linkGroupId` for
+        /// every segment made all adjacent timeline clips look like one linked block and mass-delete
+        /// removed the whole row.
+        var segmentLinkGroupsByMediaId: [Int64: [String]] = [:]
+
         for (trackIndex, track) in tl.tracks.enumerated() {
             guard let firstClip = track.children.compactMap({ item -> OTIOClip? in
                 if case .clip(let c) = item { return c } else { return nil }
@@ -587,9 +680,22 @@ actor OTIOEngine {
                 continue
             }
 
-            var newChildren: [OTIOItem] = []
+            let sortedRanges = decision.keepRanges.sorted(by: { $0.startMs < $1.startMs })
+            let mid = firstClip.mediaFileId
 
-            for range in decision.keepRanges.sorted(by: { $0.startMs < $1.startMs }) {
+            let segmentLinks: [String]
+            if let cached = segmentLinkGroupsByMediaId[mid], cached.count == sortedRanges.count {
+                segmentLinks = cached
+            } else {
+                let fresh = sortedRanges.map { _ in UUID().uuidString }
+                segmentLinkGroupsByMediaId[mid] = fresh
+                segmentLinks = fresh
+            }
+
+            var newChildren: [OTIOItem] = []
+            newChildren.reserveCapacity(sortedRanges.count)
+
+            for (segIdx, range) in sortedRanges.enumerated() {
                 let clip = OTIOClip(
                     name: firstClip.name,
                     mediaReference: firstClip.mediaReference,
@@ -603,8 +709,8 @@ actor OTIOEngine {
                             rate: file.fps
                         )
                     ),
-                    mediaFileId: firstClip.mediaFileId,
-                    linkGroupId: firstClip.linkGroupId
+                    mediaFileId: mid,
+                    linkGroupId: segmentLinks[segIdx]
                 )
                 newChildren.append(.clip(clip))
             }
