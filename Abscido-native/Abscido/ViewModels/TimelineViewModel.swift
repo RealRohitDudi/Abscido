@@ -247,12 +247,23 @@ final class TimelineViewModel {
             let selected = selectedClips()
             guard !selected.isEmpty else { return }
 
+            // Gaps are empty placeholder space. Removing one would re-flow every following clip on
+            // that track to the left, which the user reads as "the next clip got deleted too".
+            // Standard NLE "lift" behavior: deleting empty space is a no-op — drop gaps from the
+            // delete set so subsequent clips keep their timeline positions.
+            let deletableClips = selected.filter { $0.color != .gap }
+            guard !deletableClips.isEmpty else {
+                selectedClipIds.removeAll()
+                updateSelectionState()
+                return
+            }
+
             // One atomic pass avoids stale `(trackIndex, clipIndex)` when both halves of a linked
             // clip pair are selected: calling `deleteLinkedClips` twice used to remove index 0 twice
             // on the video track — deleting the wrong (next) clip after the linked pair vanished.
-            let removeLinkGroups = Set(selected.compactMap(\.linkGroupId))
+            let removeLinkGroups = Set(deletableClips.compactMap(\.linkGroupId))
             let explicitSlots = Set(
-                selected
+                deletableClips
                     .filter { $0.linkGroupId == nil }
                     .map { "\($0.trackIndex)_\($0.clipIndex)" }
             )
@@ -464,7 +475,7 @@ final class TimelineViewModel {
                         clipIndex: clipIndex,
                         color: .gap,
                         linkGroupId: nil,
-                        isSelected: false
+                        isSelected: selectedClipIds.contains(gapId)
                     ))
                     offset += durationMs
                 }
