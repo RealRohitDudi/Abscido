@@ -385,9 +385,43 @@ final class TimelineViewModel {
 
     // MARK: - Move
 
-    func moveClip(fromTrack: Int, fromIndex: Int, toTrack: Int, toTimeMs: Double) {
+    func moveClip(fromTrack: Int, fromIndex: Int, toTrack: Int, toTimeMs: Double, rippleInsert: Bool = false) {
         Task {
-            await otioEngine.moveClip(fromTrack: fromTrack, fromIndex: fromIndex, toTrack: toTrack, toTimeMs: toTimeMs)
+            await otioEngine.moveClip(
+                fromTrack: fromTrack,
+                fromIndex: fromIndex,
+                toTrack: toTrack,
+                toTimeMs: toTimeMs,
+                rippleInsert: rippleInsert
+            )
+            await refreshFromEngine()
+            onTimelineChanged?()
+        }
+    }
+
+    /// Razor (W): split every track at the edit playhead without seeking.
+    func razorAtPlayhead() {
+        let ms = playheadMs
+        Task {
+            await otioEngine.razorSplit(atTimelineMs: ms)
+            await refreshFromEngine()
+            onTimelineChanged?()
+        }
+    }
+
+    func rippleTrimStartToPlayhead() {
+        let ms = playheadMs
+        Task {
+            await otioEngine.rippleTrimStartToPlayhead(playheadMs: ms)
+            await refreshFromEngine()
+            onTimelineChanged?()
+        }
+    }
+
+    func rippleTrimEndToPlayhead() {
+        let ms = playheadMs
+        Task {
+            await otioEngine.rippleTrimEndToPlayhead(playheadMs: ms)
             await refreshFromEngine()
             onTimelineChanged?()
         }

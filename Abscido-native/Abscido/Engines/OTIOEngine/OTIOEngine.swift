@@ -305,6 +305,186 @@ actor OTIOEngine {
         return fresh
     }
 
+    /// Inserts a clip at `atTimeMs` by splitting whatever segment occupies that timeline position and
+    /// pushing the trailing material right (ripple insert). Mirrors `overwriteInTrack` link remapping so
+    /// split V/A partners stay paired.
+    private func rippleInsertInTrack(
+        _ track: inout OTIOTrack,
+        clip: OTIOClip,
+        atTimeMs: Double,
+        splitLinkRemap: inout [String: String]
+    ) {
+        let startMs = max(0, atTimeMs)
+        let L = clip.sourceRange.durationMs
+        guard L > 0.5 else { return }
+
+        let original = track.children
+        var newChildren: [OTIOItem] = []
+        var inserted = false
+        var cursorMs: Double = 0
+        let rate = clip.sourceRange.startTime.rate
+        let epsilon = 0.5
+
+        for item in original {
+            let itemDurMs = itemDurationMs(item)
+            let itemStart = cursorMs
+            let itemEnd = cursorMs + itemDurMs
+
+            // Whole segment finishes strictly before insertion anchor (allow tiny FP slack)
+            if itemEnd < startMs - epsilon {
+                newChildren.append(item)
+                cursorMs = itemEnd
+                continue
+            }
+
+            // Junction / leading edge — insert clip before this segment instead of slicing it apart
+            if !inserted, startMs <= itemStart + epsilon {
+                newChildren.append(.clip(clip))
+                inserted = true
+                newChildren.append(item)
+                cursorMs = itemEnd
+                continue
+            }
+
+            // Anchor inside this segment interior
+            if !inserted {
+                let cutMs = max(0, startMs - itemStart)
+                if cutMs > 0.5 {
+                    if let left = trimmedItem(item, keepStartOffsetMs: 0, keepDurationMs: cutMs, overrideLinkGroupId: nil) {
+                        newChildren.append(left)
+                    }
+                }
+
+                newChildren.append(.clip(clip))
+                inserted = true
+
+                let rightDur = itemEnd - startMs
+                if rightDur > 0.5 {
+                    let remapped = remappedLinkIdForRightHalf(of: item, remap: &splitLinkRemap)
+                    if let right = trimmedItem(item, keepStartOffsetMs: cutMs, keepDurationMs: rightDur, overrideLinkGroupId: remapped) {
+                        newChildren.append(right)
+                    }
+                }
+                cursorMs = itemEnd
+                continue
+            }
+
+            newChildren.append(item)
+            cursorMs = itemEnd
+        }
+
+        if !inserted {
+            if startMs > cursorMs + 0.5 {
+                newChildren.append(gapItem(rate: rate, durationMs: startMs - cursorMs))
+            }
+            newChildren.append(.clip(clip))
+        }
+
+        track.children = newChildren
+    }
+
+    /// Razor: split clips and gaps whose timeline spans contain `splitMs` (all tracks). One shared remap
+    /// keeps right halves linked across paired V/A edits.
+    private func splitTrackAtTimelineTime(_ track: inout OTIOTrack, at splitMs: Double, splitLinkRemap: inout [String: String]) {
+        let epsilon = 0.5
+        let split = max(0, splitMs)
+        let original = track.children
+        var newChildren: [OTIOItem] = []
+        var cursorMs = 0.0
+
+        for item in original {
+            let d = itemDurationMs(item)
+            let s = cursorMs
+            let e = cursorMs + d
+            cursorMs = e
+
+            if split <= s + epsilon || split >= e - epsilon {
+                newChildren.append(item)
+                continue
+            }
+
+            let leftDur = split - s
+            let rightDur = e - split
+            guard leftDur > epsilon, rightDur > epsilon else {
+                newChildren.append(item)
+                continue
+            }
+
+            if let left = trimmedItem(item, keepStartOffsetMs: 0, keepDurationMs: leftDur, overrideLinkGroupId: nil) {
+                newChildren.append(left)
+            }
+            let remapped = remappedLinkIdForRightHalf(of: item, remap: &splitLinkRemap)
+            if let right = trimmedItem(item, keepStartOffsetMs: leftDur, keepDurationMs: rightDur, overrideLinkGroupId: remapped) {
+                newChildren.append(right)
+            }
+        }
+
+        track.children = newChildren
+    }
+
+    /// Finds the next segment strictly containing `playheadMs` across tracks top-to-bottom.
+    private func findSegmentInterior(playheadMs: Double) -> (ti: Int, ci: Int, s: Double, e: Double, item: OTIOItem)? {
+        guard let tl = timeline else { return nil }
+        let epsilon = 0.5
+        let P = playheadMs
+
+        for ti in tl.tracks.indices {
+            var cursor = 0.0
+            for ci in tl.tracks[ti].children.indices {
+                let item = tl.tracks[ti].children[ci]
+                let d = itemDurationMs(item)
+                let s = cursor
+                let e = cursor + d
+                cursor = e
+                if P > s + epsilon && P < e - epsilon {
+                    return (ti, ci, s, e, item)
+                }
+            }
+        }
+        return nil
+    }
+
+    private func applyRippleGapTrim(
+        trackIndex ti: Int,
+        childIndex ci: Int,
+        segmentStart s: Double,
+        segmentEnd e: Double,
+        playheadMs P: Double,
+        trimTail: Bool
+    ) {
+        guard var tl = timeline,
+              ti < tl.tracks.count,
+              ci < tl.tracks[ti].children.count,
+              case .gap(let g) = tl.tracks[ti].children[ci] else { return }
+
+        let rate = g.sourceRange.startTime.rate
+
+        if trimTail {
+            let newDur = P - s
+            if newDur <= 0.5 {
+                tl.tracks[ti].children.remove(at: ci)
+            } else {
+                tl.tracks[ti].children[ci] = .gap(OTIOGap(sourceRange: OTIOTimeRange(
+                    startTime: g.sourceRange.startTime,
+                    duration: OTIOTime.fromMs(newDur, rate: rate)
+                )))
+            }
+        } else {
+            let newDur = e - P
+            if newDur <= 0.5 {
+                tl.tracks[ti].children.remove(at: ci)
+            } else {
+                tl.tracks[ti].children[ci] = .gap(OTIOGap(sourceRange: OTIOTimeRange(
+                    startTime: g.sourceRange.startTime,
+                    duration: OTIOTime.fromMs(newDur, rate: rate)
+                )))
+            }
+        }
+
+        coalesceAdjacentGaps(in: &tl.tracks[ti])
+        self.timeline = tl
+    }
+
     /// Trims an item to a sub-range. When `overrideLinkGroupId` is non-nil and the item is a clip,
     /// the returned clip's `linkGroupId` is replaced with that value — used to give the right half
     /// of a split a fresh shared id so it doesn't stay linked to its left-half sibling on the same
@@ -595,10 +775,62 @@ actor OTIOEngine {
         self.timeline = tl
     }
 
+    // MARK: - Razor & Ripple Trim
+
+    /// Razor tool: splits every timeline item intersected by `timelineMs` interior (clips and gaps).
+    func razorSplit(atTimelineMs timelineMs: Double) {
+        guard var tl = timeline else { return }
+        var splitLinkRemap: [String: String] = [:]
+        for ti in tl.tracks.indices {
+            splitTrackAtTimelineTime(&tl.tracks[ti], at: timelineMs, splitLinkRemap: &splitLinkRemap)
+        }
+        self.timeline = tl
+    }
+
+    /// Ripple trim in-point(s) so each segment spanning the playhead starts at `playheadMs` on the timeline.
+    func rippleTrimStartToPlayhead(playheadMs: Double) {
+        rippleTrim(playheadMs: playheadMs, trimTail: false)
+    }
+
+    /// Ripple trim out-point(s): each segment spanning the playhead ends at `playheadMs`.
+    func rippleTrimEndToPlayhead(playheadMs: Double) {
+        rippleTrim(playheadMs: playheadMs, trimTail: true)
+    }
+
+    private func rippleTrim(playheadMs P: Double, trimTail: Bool) {
+        while let hit = findSegmentInterior(playheadMs: P) {
+            switch hit.item {
+            case .clip(let c):
+                if trimTail {
+                    let trimAmt = hit.e - P
+                    let newEndMs = c.sourceRange.endMs - trimAmt
+                    trimClipEnd(trackIndex: hit.ti, clipIndex: hit.ci, newEndMs: newEndMs)
+                } else {
+                    let timelineDelta = P - hit.s
+                    let newStartMs = c.sourceRange.startMs + timelineDelta
+                    trimClipStart(trackIndex: hit.ti, clipIndex: hit.ci, newStartMs: newStartMs)
+                }
+            case .gap:
+                applyRippleGapTrim(
+                    trackIndex: hit.ti,
+                    childIndex: hit.ci,
+                    segmentStart: hit.s,
+                    segmentEnd: hit.e,
+                    playheadMs: P,
+                    trimTail: trimTail
+                )
+            }
+
+            guard timeline != nil else { return }
+        }
+    }
+
     // MARK: - Move
 
-    /// Moves a clip from one position to another (within or between tracks).
-    func moveClip(fromTrack: Int, fromIndex: Int, toTrack: Int, toTimeMs: Double) {
+    /// Moves clip(s) to `toTimeMs`. Default overwrites overlapping material on the destination track(s).
+    /// With `rippleInsert`: splits at the drop frame and pushes the rest of the timeline right without
+    /// removing underlying clips except by the splice.
+    func moveClip(fromTrack: Int, fromIndex: Int, toTrack: Int, toTimeMs: Double, rippleInsert: Bool = false) {
         guard var tl = timeline,
               fromTrack < tl.tracks.count,
               fromIndex < tl.tracks[fromTrack].children.count else { return }
@@ -606,6 +838,16 @@ actor OTIOEngine {
         guard case .clip(let moved) = tl.tracks[fromTrack].children[fromIndex] else { return }
 
         var splitLinkRemap: [String: String] = [:]
+        func place(track: Int, clip: OTIOClip) {
+            guard track < tl.tracks.count else { return }
+            let d = clip.sourceRange.durationMs
+            if rippleInsert {
+                rippleInsertInTrack(&tl.tracks[track], clip: clip, atTimeMs: toTimeMs, splitLinkRemap: &splitLinkRemap)
+            } else {
+                overwriteInTrack(&tl.tracks[track], clip: clip, atTimeMs: toTimeMs, durationMs: d, splitLinkRemap: &splitLinkRemap)
+            }
+        }
+
         if let lg = moved.linkGroupId {
             var extracted: [(Int, OTIOClip)] = []
             for ti in tl.tracks.indices {
@@ -617,14 +859,12 @@ actor OTIOEngine {
                 }
             }
             for (ti, clip) in extracted.sorted(by: { $0.0 < $1.0 }) {
-                let d = clip.sourceRange.durationMs
-                overwriteInTrack(&tl.tracks[ti], clip: clip, atTimeMs: toTimeMs, durationMs: d, splitLinkRemap: &splitLinkRemap)
+                place(track: ti, clip: clip)
             }
         } else {
             let item = tl.tracks[fromTrack].children.remove(at: fromIndex)
-            if case .clip(let clip) = item, toTrack < tl.tracks.count {
-                let d = clip.sourceRange.durationMs
-                overwriteInTrack(&tl.tracks[toTrack], clip: clip, atTimeMs: toTimeMs, durationMs: d, splitLinkRemap: &splitLinkRemap)
+            if case .clip(let clip) = item {
+                place(track: toTrack, clip: clip)
             }
         }
 

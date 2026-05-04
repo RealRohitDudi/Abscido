@@ -922,7 +922,11 @@ class TimelineCoordinator: NSObject {
 
         let pbItem = NSPasteboardItem()
         pbItem.setPropertyList(
-            ["fromTrack": fromTrack, "fromIndex": fromIndex],
+            [
+                "fromTrack": fromTrack,
+                "fromIndex": fromIndex,
+                "rippleInsert": event.modifierFlags.contains(.option)
+            ],
             forType: Self.timelineClipPasteboardType
         )
 
@@ -1367,7 +1371,16 @@ class TimelineCoordinator: NSObject {
             let dropX = max(0, location.x - cv.trackHeaderWidth)
             let timeMs = timelineVM.xToMs(dropX)
             guard let toTrack = trackIndexAtContentY(location.y, cv: cv) else { return false }
-            timelineVM.moveClip(fromTrack: fromTrack, fromIndex: fromIndex, toTrack: toTrack, toTimeMs: timeMs)
+            let optionFromPasteboard = (plist["rippleInsert"] as? Bool) == true
+            let optionNow = NSApp.currentEvent?.modifierFlags.contains(.option) == true
+            let rippleInsert = optionFromPasteboard || optionNow
+            timelineVM.moveClip(
+                fromTrack: fromTrack,
+                fromIndex: fromIndex,
+                toTrack: toTrack,
+                toTimeMs: timeMs,
+                rippleInsert: rippleInsert
+            )
             rebuildLayers()
             return true
         }

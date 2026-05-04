@@ -77,6 +77,8 @@ final class ShortcutEventHandler {
         // Prefer standard text-control semantics while typing (timeline uses these only after clicking the timeline).
         case .importMedia, .exportDialog, .compileEdit, .zoomIn, .zoomOut:
             return true
+        case .razorAtPlayhead, .rippleTrimStartToPlayhead, .rippleTrimEndToPlayhead:
+            return true
         default:
             return false
         }
@@ -125,6 +127,12 @@ final class ShortcutEventHandler {
             coordinator.timelineVM.unlinkSelected()
         case .selectAll:
             coordinator.selectAllWords()
+        case .razorAtPlayhead:
+            coordinator.timelineVM.razorAtPlayhead()
+        case .rippleTrimStartToPlayhead:
+            coordinator.timelineVM.rippleTrimStartToPlayhead()
+        case .rippleTrimEndToPlayhead:
+            coordinator.timelineVM.rippleTrimEndToPlayhead()
 
         // MARK: View
         case .zoomIn:

@@ -22,6 +22,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Codable {
     case linkClips          = "link_clips"
     case unlinkClips        = "unlink_clips"
     case selectAll          = "select_all"
+    case razorAtPlayhead    = "razor_at_playhead"
+    case rippleTrimStartToPlayhead = "ripple_trim_start_playhead"
+    case rippleTrimEndToPlayhead  = "ripple_trim_end_playhead"
 
     // Timeline View
     case zoomIn             = "zoom_in"
@@ -61,6 +64,9 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Codable {
         case .linkClips:        return "Link Clips"
         case .unlinkClips:      return "Unlink Clips"
         case .selectAll:        return "Select All"
+        case .razorAtPlayhead:  return "Razor (Split at Playhead)"
+        case .rippleTrimStartToPlayhead: return "Ripple Trim Start to Playhead"
+        case .rippleTrimEndToPlayhead:  return "Ripple Trim End to Playhead"
         case .zoomIn:           return "Zoom In Timeline"
         case .zoomOut:          return "Zoom Out Timeline"
         case .addVideoTrack:    return "Add Video Track"
@@ -82,7 +88,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Codable {
              .goToStart, .goToEnd:
             return .transport
         case .cutClips, .copyClips, .pasteClips, .deleteClips,
-             .linkClips, .unlinkClips, .selectAll:
+             .linkClips, .unlinkClips, .selectAll,
+             .razorAtPlayhead, .rippleTrimStartToPlayhead, .rippleTrimEndToPlayhead:
             return .editing
         case .zoomIn, .zoomOut:
             return .view
@@ -282,6 +289,9 @@ final class KeyboardShortcutManager {
         .linkClips:         .key("l", modifiers: .command),
         .unlinkClips:       .key("l", modifiers: [.command, .shift]),
         .selectAll:         .key("a", modifiers: .command),
+        .razorAtPlayhead:   .key("w"),
+        .rippleTrimStartToPlayhead: .key("q"),
+        .rippleTrimEndToPlayhead: .key("e"),
 
         // View
         .zoomIn:            .key("=", modifiers: .command),
