@@ -425,8 +425,17 @@ actor OTIOEngine {
     /// Finds the next segment strictly containing `playheadMs` across tracks top-to-bottom.
     private func findSegmentInterior(playheadMs: Double) -> (ti: Int, ci: Int, s: Double, e: Double, item: OTIOItem)? {
         guard let tl = timeline else { return nil }
-        let epsilon = 0.5
-        let P = playheadMs
+        let hits = allSegmentInteriors(playheadMs: playheadMs, in: tl)
+        guard let h = hits.first else { return nil }
+        return (h.trackIndex, h.childIndex, h.segmentStartMs, h.segmentEndMs, h.item)
+    }
+
+    /// All stacked items whose open timeline interval strictly contains `P` (one per track lane at most).
+    private func allSegmentInteriors(playheadMs P: Double, in tl: OTIOTimeline) -> [(trackIndex: Int, childIndex: Int, segmentStartMs: Double, segmentEndMs: Double, item: OTIOItem)] {
+        var hits: [(Int, Int, Double, Double, OTIOItem)] = []
+        hits.reserveCapacity(tl.tracks.count)
+
+        let interiorEpsMs = 1e-3
 
         for ti in tl.tracks.indices {
             var cursor = 0.0
@@ -436,12 +445,13 @@ actor OTIOEngine {
                 let s = cursor
                 let e = cursor + d
                 cursor = e
-                if P > s + epsilon && P < e - epsilon {
-                    return (ti, ci, s, e, item)
+                // Strict interior: trims do not apply exactly ON the clip head/tail (NLE parity).
+                if P > s + interiorEpsMs && P < e - interiorEpsMs {
+                    hits.append((trackIndex: ti, childIndex: ci, segmentStartMs: s, segmentEndMs: e, item: item))
                 }
             }
         }
-        return nil
+        return hits
     }
 
     private func applyRippleGapTrim(
@@ -634,8 +644,15 @@ actor OTIOEngine {
 
     // MARK: - Trim
 
+    /// One-frame floor (in ms at this clip rate) — used for ripple / playhead trims so edits can reach frame accuracy instead of snapping to ±100 ms UI guard.
+    private func rippleTrimResidualFloorMs(rate: Double) -> Double {
+        let fps = rate > 1e-9 ? rate : 30
+        return max(1000.0 / fps, 1e-6)
+    }
+
     /// Trims a clip's start time (trim in-point).
-    func trimClipStart(trackIndex: Int, clipIndex: Int, newStartMs: Double) {
+    /// - Parameter residualFloorMs: Keep at least this much media after the trim. UI edge drags default to 100 ms; ripple / Q uses ~one frame (`rippleTrimResidualFloorMs`).
+    func trimClipStart(trackIndex: Int, clipIndex: Int, newStartMs: Double, residualFloorMs: Double = 100) {
         guard var tl = timeline,
               trackIndex < tl.tracks.count,
               clipIndex < tl.tracks[trackIndex].children.count,
@@ -643,7 +660,8 @@ actor OTIOEngine {
 
         let rate = clip.sourceRange.startTime.rate
         let originalEndMs = clip.sourceRange.endMs
-        let clampedStart = max(0, min(newStartMs, originalEndMs - 100))
+        let floor = max(.ulpOfOne, residualFloorMs)
+        let clampedStart = max(0, min(newStartMs, originalEndMs - floor))
 
         clip.sourceRange = OTIOTimeRange(
             startTime: OTIOTime.fromMs(clampedStart, rate: rate),
@@ -787,29 +805,30 @@ actor OTIOEngine {
         self.timeline = tl
     }
 
-    /// Ripple trim in-point(s) so each segment spanning the playhead starts at `playheadMs` on the timeline.
-    func rippleTrimStartToPlayhead(playheadMs: Double) {
-        rippleTrim(playheadMs: playheadMs, trimTail: false)
+    /// Ripple trim in-point(s): discard each stacked item's **[segmentStart, playhead)** span and ripple close.
+    ///
+    /// Slots still begin at cumulative time `segmentStart`, but SOURCE (or Gap length) is shortened from the left.
+    /// The viewer must seek the CTI back to **`segmentStart`** so the pixel under playhead stays the intended
+    /// first-frame-after-trim — otherwise the CTI sits `playhead − segmentStart` seconds into the item and mimics **E**.
+    ///
+    /// - Returns: Program time (**ms**) to seek (`min(segmentStart)` over hits), or nil if nothing was trimmed.
+    @discardableResult
+    func rippleTrimStartToPlayhead(playheadMs P: Double) -> Double? {
+        rippleTrimClipStarts(playheadMs: P)
     }
 
     /// Ripple trim out-point(s): each segment spanning the playhead ends at `playheadMs`.
     func rippleTrimEndToPlayhead(playheadMs: Double) {
-        rippleTrim(playheadMs: playheadMs, trimTail: true)
+        rippleTrimTails(playheadMs: playheadMs)
     }
 
-    private func rippleTrim(playheadMs P: Double, trimTail: Bool) {
+    private func rippleTrimTails(playheadMs P: Double) {
         while let hit = findSegmentInterior(playheadMs: P) {
             switch hit.item {
             case .clip(let c):
-                if trimTail {
-                    let trimAmt = hit.e - P
-                    let newEndMs = c.sourceRange.endMs - trimAmt
-                    trimClipEnd(trackIndex: hit.ti, clipIndex: hit.ci, newEndMs: newEndMs)
-                } else {
-                    let timelineDelta = P - hit.s
-                    let newStartMs = c.sourceRange.startMs + timelineDelta
-                    trimClipStart(trackIndex: hit.ti, clipIndex: hit.ci, newStartMs: newStartMs)
-                }
+                let trimAmt = hit.e - P
+                let newEndMs = c.sourceRange.endMs - trimAmt
+                trimClipEnd(trackIndex: hit.ti, clipIndex: hit.ci, newEndMs: newEndMs)
             case .gap:
                 applyRippleGapTrim(
                     trackIndex: hit.ti,
@@ -817,12 +836,83 @@ actor OTIOEngine {
                     segmentStart: hit.s,
                     segmentEnd: hit.e,
                     playheadMs: P,
-                    trimTail: trimTail
+                    trimTail: true
                 )
             }
 
             guard timeline != nil else { return }
         }
+    }
+
+    private func rippleTrimClipStarts(playheadMs P: Double) -> Double? {
+        guard let tl = timeline else { return nil }
+        let hits = allSegmentInteriors(playheadMs: P, in: tl)
+        guard !hits.isEmpty else { return nil }
+
+        var seekToMinSegmentStart: Double?
+
+        func recordSeek(at segmentStart: Double) {
+            if let prev = seekToMinSegmentStart {
+                seekToMinSegmentStart = min(prev, segmentStart)
+            } else {
+                seekToMinSegmentStart = segmentStart
+            }
+        }
+
+        for hit in hits {
+            switch hit.item {
+            case .clip:
+                recordSeek(at: hit.segmentStartMs)
+                applyRippleHeadTrimToClip(
+                    trackIndex: hit.trackIndex,
+                    childIndex: hit.childIndex,
+                    segmentStartMs: hit.segmentStartMs,
+                    playheadMs: P
+                )
+
+            case .gap:
+                recordSeek(at: hit.segmentStartMs)
+                applyRippleGapTrim(
+                    trackIndex: hit.trackIndex,
+                    childIndex: hit.childIndex,
+                    segmentStart: hit.segmentStartMs,
+                    segmentEnd: hit.segmentEndMs,
+                    playheadMs: P,
+                    trimTail: false
+                )
+            }
+        }
+
+        return seekToMinSegmentStart
+    }
+
+    /// Advances **this** clip's source in-point by `(playheadMs - segmentStartMs)` while keeping **this clip's own**
+    /// source out-point (`endMs`). Used only for ripple trim start (Q).
+    ///
+    /// `trimClipStart` + `trimLinkedClips` was wrong here: linked partners were forced onto the primary's
+    /// `originalEndMs`, wiping different A/V tails and looking like footage was cut from the **end**.
+    private func applyRippleHeadTrimToClip(trackIndex ti: Int, childIndex ci: Int, segmentStartMs s: Double, playheadMs P: Double) {
+        guard var tl = timeline,
+              ti < tl.tracks.count,
+              ci < tl.tracks[ti].children.count,
+              case .clip(var clip) = tl.tracks[ti].children[ci]
+        else { return }
+
+        let deltaT = P - s
+        guard deltaT > 1e-6 else { return }
+
+        let rate = clip.sourceRange.startTime.rate
+        let endMs = clip.sourceRange.endMs
+        let newStartRaw = clip.sourceRange.startMs + deltaT
+        let rippleFloor = rippleTrimResidualFloorMs(rate: rate)
+        let clampedStart = max(0, min(newStartRaw, endMs - rippleFloor))
+
+        clip.sourceRange = OTIOTimeRange(
+            startTime: OTIOTime.fromMs(clampedStart, rate: rate),
+            duration: OTIOTime.fromMs(endMs - clampedStart, rate: rate)
+        )
+        tl.tracks[ti].children[ci] = .clip(clip)
+        self.timeline = tl
     }
 
     // MARK: - Move

@@ -694,10 +694,7 @@ class TimelineCoordinator: NSObject {
         timeObserverCancellable = playerVM.timeStream
             .receive(on: RunLoop.main)
             .sink { [weak self] ms in
-                self?.container?.contentView.updatePlayhead(
-                    ms: ms,
-                    pps: self?.timelineVM.pixelsPerSecond ?? 100
-                )
+                self?.syncPlayheadToTimeline(ms: ms)
             }
 
         // Observe horizontal scroll to pin headers in place
@@ -715,6 +712,14 @@ class TimelineCoordinator: NSObject {
         }
 
         rebuildLayers()
+    }
+
+    /// Keeps `TimelineViewModel.playheadMs` aligned with the player/visual playhead — required for razor,
+    /// ripple trim, paste-at-playhead, and other edit ops that snapshot time from the view model.
+    private func syncPlayheadToTimeline(ms: Double) {
+        let clipped = max(0, ms)
+        timelineVM.updatePlayhead(ms: clipped)
+        container?.contentView.updatePlayhead(ms: clipped, pps: timelineVM.pixelsPerSecond)
     }
 
     // MARK: - Rebuild (expensive — only when data changes)
@@ -738,10 +743,7 @@ class TimelineCoordinator: NSObject {
     // MARK: - Playhead update (cheap — every frame)
 
     func updatePlayheadOnly() {
-        container?.contentView.updatePlayhead(
-            ms: playerVM.currentTimeMs,
-            pps: timelineVM.pixelsPerSecond
-        )
+        syncPlayheadToTimeline(ms: playerVM.currentTimeMs)
     }
 
     func updateContentSize() {
@@ -969,7 +971,7 @@ class TimelineCoordinator: NSObject {
                 let clipX = location.x - cv.trackHeaderWidth
                 let ms = min(timelineVM.xToMs(clipX), timelineVM.totalDurationMs)
                 playerVM.seek(to: ms)
-                cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+                syncPlayheadToTimeline(ms: ms)
             }
             rebuildLayers()
             return
@@ -1159,19 +1161,18 @@ class TimelineCoordinator: NSObject {
         if isScrubbing && loc.x > cv.trackHeaderWidth {
             let clipX = loc.x - cv.trackHeaderWidth
             let ms = min(timelineVM.xToMs(clipX), timelineVM.totalDurationMs)
-            // Update playhead layer instantly (don't wait for async seek callback)
-            cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
             playerVM.seek(to: ms)
+            syncPlayheadToTimeline(ms: ms)
         }
     }
 
     func handleMouseUp(with event: NSEvent) {
         defer { suppressSeekForLaneClick = false }
 
-        if let cv = container?.contentView, let p = pendingClipBodyAction {
+        if let p = pendingClipBodyAction {
             let ms = min(max(0, p.timelineMsUnderClick), timelineVM.totalDurationMs)
             playerVM.seek(to: ms)
-            cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+            syncPlayheadToTimeline(ms: ms)
             pendingClipBodyAction = nil
         }
 
@@ -1184,7 +1185,7 @@ class TimelineCoordinator: NSObject {
                 if loc.x > cv.trackHeaderWidth, !suppressSeekForLaneClick {
                     let ms = min(timelineVM.xToMs(loc.x - cv.trackHeaderWidth), timelineVM.totalDurationMs)
                     playerVM.seek(to: ms)
-                    cv.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+                    syncPlayheadToTimeline(ms: ms)
                 }
             }
             container?.contentView.showMarquee(nil)
@@ -1336,10 +1337,29 @@ class TimelineCoordinator: NSObject {
         } else {
             menu.addItem(withTitle: "Paste", action: #selector(pasteAction), keyEquivalent: "v").target = self
         }
+
+        menu.addItem(NSMenuItem.separator())
+        addPlayheadTrimMenuItems(to: menu)
+
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Add Video Track", action: #selector(addVideoTrack), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Add Audio Track", action: #selector(addAudioTrack), keyEquivalent: "").target = self
         return menu
+    }
+
+    /// Same operations as `ShortcutAction` razor / ripple trim (W, Q, E); key hints match default bindings.
+    private func addPlayheadTrimMenuItems(to menu: NSMenu) {
+        let razor = menu.addItem(withTitle: "Razor (Split at Playhead)", action: #selector(razorAction), keyEquivalent: "w")
+        razor.target = self
+        razor.keyEquivalentModifierMask = []
+
+        let rippleStart = menu.addItem(withTitle: "Ripple Trim Start to Playhead", action: #selector(rippleTrimStartAction), keyEquivalent: "q")
+        rippleStart.target = self
+        rippleStart.keyEquivalentModifierMask = []
+
+        let rippleEnd = menu.addItem(withTitle: "Ripple Trim End to Playhead", action: #selector(rippleTrimEndAction), keyEquivalent: "e")
+        rippleEnd.target = self
+        rippleEnd.keyEquivalentModifierMask = []
     }
 
     @objc func cutAction() { timelineVM.cutSelected() }
@@ -1356,6 +1376,12 @@ class TimelineCoordinator: NSObject {
     }
     @objc func addVideoTrack() { timelineVM.addTrack(kind: .video) }
     @objc func addAudioTrack() { timelineVM.addTrack(kind: .audio) }
+
+    @objc func razorAction() { timelineVM.razorAtPlayhead() }
+
+    @objc func rippleTrimStartAction() { timelineVM.rippleTrimStartToPlayhead() }
+
+    @objc func rippleTrimEndAction() { timelineVM.rippleTrimEndToPlayhead() }
 
     // MARK: - Drop Handler
 

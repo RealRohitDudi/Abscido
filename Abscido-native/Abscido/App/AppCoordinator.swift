@@ -34,6 +34,10 @@ final class AppCoordinator {
         // Install global shortcut handler
         shortcutHandler = ShortcutEventHandler(coordinator: self)
         shortcutHandler?.install()
+
+        timelineVM.onRippleTrimSeekProgramMs = { [weak self] t in
+            self?.playerVM.seek(to: t)
+        }
     }
 
     // MARK: - Coordinated Actions

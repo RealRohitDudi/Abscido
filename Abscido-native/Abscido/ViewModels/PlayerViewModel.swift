@@ -105,6 +105,7 @@ final class PlayerViewModel {
         player.seek(to: .zero)
         isPlaying = false
         currentTimeMs = 0
+        timePublisher.send(0)
     }
 
     // MARK: - Seeking
@@ -114,6 +115,7 @@ final class PlayerViewModel {
         let time = CMTime.fromMs(ms)
         player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         currentTimeMs = ms
+        timePublisher.send(ms)
     }
 
     /// Steps one frame forward.

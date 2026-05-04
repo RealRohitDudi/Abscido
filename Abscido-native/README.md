@@ -2,6 +2,8 @@
 
 A professional text-based video editor built entirely in Swift and SwiftUI for macOS.
 The transcript IS the timeline — delete words in the transcript, and the video edit updates in real time.
+The main philosophy is to build a scalable and production grade Video editor.
+The main inspiration is Davinci Resolve.
 
 ## Requirements
 

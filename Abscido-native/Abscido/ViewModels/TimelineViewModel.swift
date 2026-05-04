@@ -38,6 +38,8 @@ final class TimelineViewModel {
 
     var tracks: [TrackModel] = []
     var totalDurationMs: Double = 0
+    /// Mirrors the playback edit line (kept in sync from `TimelineCoordinator` + `PlayerViewModel`).
+    /// Used for razor, ripple trim, paste-at-playhead, etc.
     var playheadMs: Double = 0
     var pixelsPerSecond: Double = 100.0
 
@@ -60,6 +62,9 @@ final class TimelineViewModel {
 
     /// Callback to notify parent when timeline changes require composition rebuild.
     var onTimelineChanged: (() -> Void)?
+
+    /// After ripple trim start (Q), move the program playhead to this sequence time (clip head / min lane start).
+    var onRippleTrimSeekProgramMs: ((Double) -> Void)?
 
     let otioEngine = OTIOEngine()
     private let waveformGenerator = WaveformGenerator()
@@ -399,7 +404,7 @@ final class TimelineViewModel {
         }
     }
 
-    /// Razor (W): split every track at the edit playhead without seeking.
+    /// Razor (W): split every track at the current edit/playback time (`playheadMs`).
     func razorAtPlayhead() {
         let ms = playheadMs
         Task {
@@ -411,9 +416,12 @@ final class TimelineViewModel {
 
     func rippleTrimStartToPlayhead() {
         let ms = playheadMs
-        Task {
-            await otioEngine.rippleTrimStartToPlayhead(playheadMs: ms)
+        Task { @MainActor in
+            let seekProgramMs = await otioEngine.rippleTrimStartToPlayhead(playheadMs: ms)
             await refreshFromEngine()
+            if let seekProgramMs {
+                onRippleTrimSeekProgramMs?(seekProgramMs)
+            }
             onTimelineChanged?()
         }
     }
