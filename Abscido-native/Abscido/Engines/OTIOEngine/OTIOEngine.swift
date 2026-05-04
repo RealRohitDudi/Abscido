@@ -808,10 +808,11 @@ actor OTIOEngine {
     /// Ripple trim in-point(s): discard each stacked item's **[segmentStart, playhead)** span and ripple close.
     ///
     /// Slots still begin at cumulative time `segmentStart`, but SOURCE (or Gap length) is shortened from the left.
-    /// The viewer must seek the CTI back to **`segmentStart`** so the pixel under playhead stays the intended
-    /// first-frame-after-trim — otherwise the CTI sits `playhead − segmentStart` seconds into the item and mimics **E**.
+    /// The first kept frame **was** under the CTI at `playheadMs` but afterward it maps to **`segmentStart`**
+    /// on the timeline — return `min(segmentStart)` across hit tracks so callers can park the CTI at the clip
+    /// head (same picture as before the trim), not at the raw program clock `playheadMs`.
     ///
-    /// - Returns: Program time (**ms**) to seek (`min(segmentStart)` over hits), or nil if nothing was trimmed.
+    /// - Returns: Program time (**ms**) of the clipped head (`min(segmentStart)`), or `nil` if nothing was trimmed.
     @discardableResult
     func rippleTrimStartToPlayhead(playheadMs P: Double) -> Double? {
         rippleTrimClipStarts(playheadMs: P)
@@ -849,20 +850,20 @@ actor OTIOEngine {
         let hits = allSegmentInteriors(playheadMs: P, in: tl)
         guard !hits.isEmpty else { return nil }
 
-        var seekToMinSegmentStart: Double?
+        var clipHeadProgramMs: Double?
 
-        func recordSeek(at segmentStart: Double) {
-            if let prev = seekToMinSegmentStart {
-                seekToMinSegmentStart = min(prev, segmentStart)
+        func recordClipHead(at segmentStart: Double) {
+            if let prev = clipHeadProgramMs {
+                clipHeadProgramMs = min(prev, segmentStart)
             } else {
-                seekToMinSegmentStart = segmentStart
+                clipHeadProgramMs = segmentStart
             }
         }
 
         for hit in hits {
             switch hit.item {
             case .clip:
-                recordSeek(at: hit.segmentStartMs)
+                recordClipHead(at: hit.segmentStartMs)
                 applyRippleHeadTrimToClip(
                     trackIndex: hit.trackIndex,
                     childIndex: hit.childIndex,
@@ -871,7 +872,7 @@ actor OTIOEngine {
                 )
 
             case .gap:
-                recordSeek(at: hit.segmentStartMs)
+                recordClipHead(at: hit.segmentStartMs)
                 applyRippleGapTrim(
                     trackIndex: hit.trackIndex,
                     childIndex: hit.childIndex,
@@ -883,7 +884,7 @@ actor OTIOEngine {
             }
         }
 
-        return seekToMinSegmentStart
+        return clipHeadProgramMs
     }
 
     /// Advances **this** clip's source in-point by `(playheadMs - segmentStartMs)` while keeping **this clip's own**

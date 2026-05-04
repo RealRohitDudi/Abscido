@@ -35,10 +35,6 @@ final class AppCoordinator {
         shortcutHandler = ShortcutEventHandler(coordinator: self)
         shortcutHandler?.install()
 
-        timelineVM.onRippleTrimSeekProgramMs = { [weak self] t in
-            self?.playerVM.seek(to: t)
-        }
-
         // Every OTIO mutation (Q ripple-trim start, E ripple-trim end, razor, paste-at-playhead,
         // move/insert, link/unlink, gap delete, manual edge trim, etc.) calls
         // `timelineVM.onTimelineChanged`. Rebuilding the player composition from the current OTIO
@@ -53,6 +49,7 @@ final class AppCoordinator {
 
     private func rebuildPlayerCompositionFromTimeline() {
         let mediaFiles = projectVM.mediaFiles
+        let programMs = timelineVM.playheadMs
         Task { [weak self] in
             guard let self else { return }
             guard let timeline = await self.timelineVM.otioEngine.currentTimeline() else { return }
@@ -63,6 +60,11 @@ final class AppCoordinator {
                 )
                 await MainActor.run {
                     self.playerVM.loadComposition(composition)
+                    // Replacing `currentItem` often resets playback time — restore the CTI so Q/E and
+                    // other trims don't jump the playhead (e.g. to 0 or to a former seek target).
+                    let dur = composition.duration.toMs
+                    let clamped = min(max(0, programMs), max(0, dur))
+                    self.playerVM.seek(to: clamped)
                 }
             } catch {
                 await MainActor.run {

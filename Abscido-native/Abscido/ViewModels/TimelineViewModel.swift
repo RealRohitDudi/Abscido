@@ -63,9 +63,6 @@ final class TimelineViewModel {
     /// Callback to notify parent when timeline changes require composition rebuild.
     var onTimelineChanged: (() -> Void)?
 
-    /// After ripple trim start (Q), move the program playhead to this sequence time (clip head / min lane start).
-    var onRippleTrimSeekProgramMs: ((Double) -> Void)?
-
     let otioEngine = OTIOEngine()
     private let waveformGenerator = WaveformGenerator()
 
@@ -417,10 +414,13 @@ final class TimelineViewModel {
     func rippleTrimStartToPlayhead() {
         let ms = playheadMs
         Task { @MainActor in
-            let seekProgramMs = await otioEngine.rippleTrimStartToPlayhead(playheadMs: ms)
+            let clipHeadProgramMs = await otioEngine.rippleTrimStartToPlayhead(playheadMs: ms)
             await refreshFromEngine()
-            if let seekProgramMs {
-                onRippleTrimSeekProgramMs?(seekProgramMs)
+            // Park the CTI at the **clip head** (`segmentStart`): that is the timeline position of the first
+            // frame left after Q — staying at raw program time `ms` would leave the needle mid-clip relative
+            // to the new trim (looks like trimming the wrong edge). E already leaves the needle at clip tail.
+            if let h = clipHeadProgramMs {
+                updatePlayhead(ms: h)
             }
             onTimelineChanged?()
         }
