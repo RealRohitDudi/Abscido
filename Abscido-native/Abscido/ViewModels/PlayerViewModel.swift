@@ -15,6 +15,11 @@ final class PlayerViewModel {
     var playbackRate: Float = 1.0
     var volume: Float = 1.0
 
+    /// When `false`, the player is showing a **source file** (media-bin preview). Periodic time
+    /// updates must not drive `TimelineViewModel.playheadMs` or the ruler CTI — those stay at the
+    /// edit program time until the user returns to the timeline composition.
+    var timelinePlayheadTracksProgramTime: Bool = true
+
     private(set) var player: AVPlayer
     private var timeObserver: Any?
     private var timePublisher = PassthroughSubject<Double, Never>()
@@ -73,6 +78,7 @@ final class PlayerViewModel {
     }
 
     func loadComposition(_ composition: AVComposition) {
+        timelinePlayheadTracksProgramTime = true
         let playerItem = AVPlayerItem(asset: composition)
         player.replaceCurrentItem(with: playerItem)
         durationMs = composition.duration.toMs

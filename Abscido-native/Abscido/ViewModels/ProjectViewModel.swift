@@ -56,6 +56,18 @@ final class ProjectViewModel {
         }
     }
 
+    /// Writes `projects.otio_json` and mirrors into `currentProject` (used after timeline edits / Save).
+    func persistOTIOTimelineJSON(_ json: String) {
+        guard var project = currentProject else { return }
+        do {
+            try projectRepo.updateOTIOJSON(projectId: project.id, json: json)
+            project.otioJSON = json
+            currentProject = project
+        } catch {
+            errorMessage = "Failed to save timeline: \(error.localizedDescription)"
+        }
+    }
+
     func deleteProject(id: Int64) {
         do {
             try projectRepo.delete(id: id)

@@ -61,6 +61,21 @@ actor OTIOEngine {
         return tl
     }
 
+    /// V1 + A1 with no clips — used for new sessions and before the first drop/insert.
+    /// Does **not** add bin media; use `buildTimeline(from:)` only when you intentionally want every file laid out.
+    func ensureEmptyTimeline() -> OTIOTimeline {
+        if let tl = timeline { return tl }
+        let tl = OTIOTimeline(
+            name: "Abscido Timeline",
+            tracks: [
+                OTIOTrack(name: "V1", kind: .video, children: []),
+                OTIOTrack(name: "A1", kind: .audio, children: []),
+            ]
+        )
+        self.timeline = tl
+        return tl
+    }
+
     // MARK: - Insert
 
     /// Places linked V+A at `atTimeMs` on the timeline (splits/overlaps gaps and clips, pads with gap
@@ -994,6 +1009,13 @@ actor OTIOEngine {
             return buildTimeline(from: mediaFiles)
         }
 
+        let hasAnyClip = tl.tracks.contains { track in
+            track.children.contains { if case .clip = $0 { return true }; return false }
+        }
+        if !hasAnyClip, !decisions.isEmpty {
+            return buildTimeline(from: mediaFiles)
+        }
+
         let fileMap = Dictionary(uniqueKeysWithValues: mediaFiles.map { ($0.id, $0) })
 
         /// One fresh `linkGroupId` per kept **segment** (ripple range), shared by every track that
@@ -1101,6 +1123,15 @@ actor OTIOEngine {
         let otioTimeline = try OpenTimelineIO.Timeline.fromJSON(url: url) as! OpenTimelineIO.Timeline
         let bridgeTimeline = OTIOTimeline.from(otioTimeline)
         self.timeline = bridgeTimeline
+    }
+
+    /// Restores timeline from persisted `OTIOTimeline` bridge JSON (see `exportBridgeJSON()`).
+    func importBridgeJSON(_ json: String) throws {
+        guard let data = json.data(using: .utf8) else {
+            throw AbscidoError.databaseError(underlying: "Stored timeline is not valid UTF-8")
+        }
+        let decoded = try JSONDecoder().decode(OTIOTimeline.self, from: data)
+        self.timeline = decoded
     }
 
     /// Saves the current timeline to a .otio file.

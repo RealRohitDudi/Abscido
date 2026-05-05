@@ -44,6 +44,7 @@ final class AppCoordinator {
         // clip's TAIL got trimmed (the original `[0, 7s]` of source) instead of its HEAD.
         timelineVM.onTimelineChanged = { [weak self] in
             self?.rebuildPlayerCompositionFromTimeline()
+            self?.persistCurrentTimelineJSON()
         }
     }
 
@@ -74,10 +75,38 @@ final class AppCoordinator {
         }
     }
 
+    /// Serializes the OTIO bridge timeline into `projects.otio_json` (debounced by caller frequency).
+    private func persistCurrentTimelineJSON() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let json = try await self.timelineVM.exportBridgeJSONForPersistence()
+                await MainActor.run {
+                    self.projectVM.persistOTIOTimelineJSON(json)
+                }
+            } catch {
+                // Empty or invalid engine state — skip silently.
+            }
+        }
+    }
+
     // MARK: - Coordinated Actions
 
     func saveProject() {
-        projectVM.saveProject()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let json = try await self.timelineVM.exportBridgeJSONForPersistence()
+                await MainActor.run {
+                    self.projectVM.persistOTIOTimelineJSON(json)
+                    self.projectVM.saveProject()
+                }
+            } catch {
+                await MainActor.run {
+                    self.projectVM.saveProject()
+                }
+            }
+        }
     }
 
     func selectAllWords() {

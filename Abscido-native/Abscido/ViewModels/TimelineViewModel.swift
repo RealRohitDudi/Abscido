@@ -72,20 +72,46 @@ final class TimelineViewModel {
         tracks.flatMap(\.clips)
     }
 
-    // MARK: - Build
+    // MARK: - Build / Hydrate / Persist
 
-    func buildInitial(mediaFiles: [MediaFile]) {
-        Task {
-            let timeline = await otioEngine.buildTimeline(from: mediaFiles)
-            await refreshFromEngine()
-            await generateWaveforms(for: mediaFiles)
+    /// Loads OTIO from `Project.otioJSON` or creates an empty V1/A1 shell. Does **not** mirror media-bin selection.
+    func hydrateFromProject(otioJSON: String?, mediaFiles: [MediaFile]) async {
+        waveformData = [:]
+        waveformRevision &+= 1
+        selectedClipIds = []
+        await otioEngine.reset()
+        if let json = otioJSON, !json.isEmpty {
+            do {
+                try await otioEngine.importBridgeJSON(json)
+                let loadedAfterImport = await otioEngine.currentTimeline()
+                if loadedAfterImport == nil || loadedAfterImport?.tracks.isEmpty != false {
+                    await otioEngine.reset()
+                    _ = await otioEngine.ensureEmptyTimeline()
+                }
+            } catch {
+                _ = await otioEngine.ensureEmptyTimeline()
+            }
+        } else {
+            _ = await otioEngine.ensureEmptyTimeline()
         }
+        await refreshFromEngine()
+        let touched = Set(clips.map(\.mediaFileId)).filter { $0 != 0 }
+        let files = mediaFiles.filter { touched.contains($0.id) }
+        if !files.isEmpty {
+            await generateWaveforms(for: files)
+        }
+    }
+
+    /// Encodes the current timeline for `projects.otio_json`.
+    func exportBridgeJSONForPersistence() async throws -> String {
+        try await otioEngine.exportBridgeJSON()
     }
 
     func rebuild(editDecisions: [EditDecision], mediaFiles: [MediaFile]) {
         Task {
             _ = await otioEngine.applyEditDecisions(editDecisions, mediaFiles: mediaFiles)
             await refreshFromEngine()
+            onTimelineChanged?()
         }
     }
 
@@ -94,7 +120,7 @@ final class TimelineViewModel {
     func insertMedia(_ file: MediaFile, atTimeMs timeMs: Double, allMediaFiles: [MediaFile]) {
         Task {
             if await otioEngine.currentTimeline() == nil {
-                _ = await otioEngine.buildTimeline(from: allMediaFiles)
+                _ = await otioEngine.ensureEmptyTimeline()
             }
 
             guard let tl = await otioEngine.currentTimeline() else { return }
@@ -116,7 +142,7 @@ final class TimelineViewModel {
         Task {
             // Ensure timeline exists
             if await otioEngine.currentTimeline() == nil {
-                _ = await otioEngine.buildTimeline(from: allMediaFiles)
+                _ = await otioEngine.ensureEmptyTimeline()
             }
 
             await otioEngine.insertMedia(
@@ -127,13 +153,14 @@ final class TimelineViewModel {
             )
             await refreshFromEngine()
             await generateWaveforms(for: [file])
+            onTimelineChanged?()
         }
     }
 
     func overwriteMedia(_ file: MediaFile, atTimeMs timeMs: Double, allMediaFiles: [MediaFile]) {
         Task {
             if await otioEngine.currentTimeline() == nil {
-                _ = await otioEngine.buildTimeline(from: allMediaFiles)
+                _ = await otioEngine.ensureEmptyTimeline()
             }
 
             guard let tl = await otioEngine.currentTimeline() else { return }
@@ -154,7 +181,7 @@ final class TimelineViewModel {
     ) {
         Task {
             if await otioEngine.currentTimeline() == nil {
-                _ = await otioEngine.buildTimeline(from: allMediaFiles)
+                _ = await otioEngine.ensureEmptyTimeline()
             }
 
             await otioEngine.overwriteMedia(
@@ -165,6 +192,7 @@ final class TimelineViewModel {
             )
             await refreshFromEngine()
             await generateWaveforms(for: [file])
+            onTimelineChanged?()
         }
     }
 
@@ -362,6 +390,7 @@ final class TimelineViewModel {
             let clipIndices = selected.map(\.clipIndex)
             await otioEngine.linkClips(trackIndices: trackIndices, clipIndices: clipIndices)
             await refreshFromEngine()
+            onTimelineChanged?()
         }
     }
 
@@ -373,6 +402,7 @@ final class TimelineViewModel {
             let clipIndices = selected.map(\.clipIndex)
             await otioEngine.unlinkClips(trackIndices: trackIndices, clipIndices: clipIndices)
             await refreshFromEngine()
+            onTimelineChanged?()
         }
     }
 
@@ -382,6 +412,7 @@ final class TimelineViewModel {
         Task {
             await otioEngine.addTrack(kind: kind)
             await refreshFromEngine()
+            onTimelineChanged?()
         }
     }
 

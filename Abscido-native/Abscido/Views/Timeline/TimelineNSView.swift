@@ -713,7 +713,9 @@ class TimelineCoordinator: NSObject {
         timeObserverCancellable = playerVM.timeStream
             .receive(on: RunLoop.main)
             .sink { [weak self] ms in
-                self?.syncPlayheadToTimeline(ms: ms)
+                guard let self else { return }
+                guard self.playerVM.timelinePlayheadTracksProgramTime else { return }
+                self.syncPlayheadToTimeline(ms: ms)
             }
 
         // Observe horizontal scroll to pin headers in place
@@ -762,7 +764,12 @@ class TimelineCoordinator: NSObject {
     // MARK: - Playhead update (cheap — every frame)
 
     func updatePlayheadOnly() {
-        syncPlayheadToTimeline(ms: playerVM.currentTimeMs)
+        if playerVM.timelinePlayheadTracksProgramTime {
+            syncPlayheadToTimeline(ms: playerVM.currentTimeMs)
+        } else {
+            let ms = timelineVM.playheadMs
+            container?.contentView.updatePlayhead(ms: ms, pps: timelineVM.pixelsPerSecond)
+        }
     }
 
     func updateContentSize() {

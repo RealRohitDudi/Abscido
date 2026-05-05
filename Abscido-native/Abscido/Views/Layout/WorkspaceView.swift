@@ -18,7 +18,8 @@ struct WorkspaceView: View {
             MediaBinView(
                 mediaFiles: projectVM.mediaFiles,
                 selectedId: $selectedMediaFileId,
-                onRemove: { file in projectVM.removeMediaFile(file) }
+                onRemove: { file in projectVM.removeMediaFile(file) },
+                onSelect: { file in loadMediaFile(file) }
             )
             .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         } content: {
@@ -77,12 +78,40 @@ struct WorkspaceView: View {
         .onChange(of: selectedMediaFileId) { _, newId in
             if let id = newId, let file = projectVM.mediaFile(forId: id) {
                 loadMediaFile(file)
+            } else {
+                restoreProgramPreviewFromTimeline()
+            }
+        }
+        .onChange(of: projectVM.currentProject?.id) { _, _ in
+            Task {
+                await timelineVM.hydrateFromProject(
+                    otioJSON: projectVM.currentProject?.otioJSON,
+                    mediaFiles: projectVM.mediaFiles
+                )
+                await MainActor.run {
+                    timelineVM.onTimelineChanged?()
+                    if let first = projectVM.mediaFiles.first {
+                        selectedMediaFileId = first.id
+                        loadMediaFile(first)
+                    } else {
+                        selectedMediaFileId = nil
+                    }
+                }
             }
         }
         .onAppear {
-            if let first = projectVM.mediaFiles.first {
-                selectedMediaFileId = first.id
-                loadMediaFile(first)
+            Task {
+                await timelineVM.hydrateFromProject(
+                    otioJSON: projectVM.currentProject?.otioJSON,
+                    mediaFiles: projectVM.mediaFiles
+                )
+                await MainActor.run {
+                    timelineVM.onTimelineChanged?()
+                    if let first = projectVM.mediaFiles.first {
+                        selectedMediaFileId = first.id
+                        loadMediaFile(first)
+                    }
+                }
             }
         }
     }
@@ -96,12 +125,24 @@ struct WorkspaceView: View {
 
     // MARK: - Actions
 
+    /// Bin selection drives **source** preview + transcript only. Timeline edits stay in OTIO until
+    /// the user drops/clips/transcribes (see `TimelineView`, `insertMedia`, `rebuild`).
     private func loadMediaFile(_ file: MediaFile) {
+        let fileId = file.id
+        playerVM.timelinePlayheadTracksProgramTime = false
         Task {
             await playerVM.loadMedia(url: file.url)
-            transcriptVM.loadTranscript(clipId: file.id)
-            timelineVM.buildInitial(mediaFiles: projectVM.mediaFiles)
+            await MainActor.run {
+                guard selectedMediaFileId == fileId else { return }
+                transcriptVM.loadTranscript(clipId: fileId)
+            }
         }
+    }
+
+    /// Clears bin preview: player follows the OTIO program again at the current edit playhead.
+    private func restoreProgramPreviewFromTimeline() {
+        playerVM.timelinePlayheadTracksProgramTime = true
+        timelineVM.onTimelineChanged?()
     }
 
     private func handleTranscribe() {
