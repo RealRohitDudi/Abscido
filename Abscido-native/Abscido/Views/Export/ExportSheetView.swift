@@ -139,39 +139,62 @@ struct ExportSheetView: View {
         Task { @MainActor in
             let seqName = "\(project.name) - Abscido Edit"
             do {
-                let timeline = try await timelineVM.openTimelineForInterchangeExport(sequenceDisplayName: seqName)
                 switch format {
+                case .otio:
+                    let timeline = try await timelineVM.openTimelineForInterchangeExport(sequenceDisplayName: seqName)
+                    try await exportEngine.exportOTIOJSON(timeline: timeline, outputURL: outputURL)
                 case .fcp7:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        exportMessage = "Error: No timeline loaded."
+                        return
+                    }
                     try await exportEngine.exportFcp7XML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: outputURL
                     )
                 case .fcpxml:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        exportMessage = "Error: No timeline loaded."
+                        return
+                    }
                     try await exportEngine.exportFCPXML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: outputURL
                     )
                 case .both:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        exportMessage = "Error: No timeline loaded."
+                        return
+                    }
                     let fcp7URL = outputURL.deletingPathExtension().appendingPathExtension("xml")
                     let fcpxURL = outputURL.deletingPathExtension().appendingPathExtension("fcpxml")
                     try await exportEngine.exportFcp7XML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: fcp7URL
                     )
                     try await exportEngine.exportFCPXML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: fcpxURL
                     )
-                case .otio:
-                    try await exportEngine.exportOTIOJSON(timeline: timeline, outputURL: outputURL)
+                case .edl:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        exportMessage = "Error: No timeline loaded."
+                        return
+                    }
+                    try await exportEngine.exportEDL(
+                        bridgeTimeline: bridge,
+                        mediaFiles: projectVM.mediaFiles,
+                        projectName: project.name,
+                        outputURL: outputURL
+                    )
                 }
                 exportMessage = "Exported successfully"
             } catch {

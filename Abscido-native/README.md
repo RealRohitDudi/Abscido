@@ -147,6 +147,8 @@ Abscido/
 ### XML Export
 - **FCP7 XML** — compatible with Premiere Pro, DaVinci Resolve
 - **FCPXML 1.10** — compatible with Final Cut Pro X
+- **EDL** — compatible with Davinci resolve
+- **OTIO** — compatible with Davinci Resolve
 
 ## Database
 

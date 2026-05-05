@@ -157,6 +157,8 @@ final class ShortcutEventHandler {
             coordinator.showExport = true
         case .xmlExport:
             coordinator.showXmlExport = true
+        case .edlExport:
+            coordinator.presentEDLExport()
 
         // MARK: History
         case .undo:

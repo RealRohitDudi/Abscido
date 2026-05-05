@@ -127,10 +127,15 @@ struct AbscidoApp: App {
 
                 Divider()
 
-                Button("Export XML...") {
+                Button("Export Timeline") {
                     coordinator.showXmlExport = true
                 }
                 .modifier(DynamicShortcut(action: .xmlExport))
+
+                Button("Export EDL...") {
+                    coordinator.presentEDLExport()
+                }
+                .modifier(DynamicShortcut(action: .edlExport))
             }
 
             // MARK: - View Menu

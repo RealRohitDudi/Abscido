@@ -40,6 +40,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Codable {
     case compileEdit        = "compile_edit"
     case exportDialog       = "export_dialog"
     case xmlExport          = "xml_export"
+    case edlExport          = "edl_export"
 
     // Undo/Redo
     case undo               = "undo"
@@ -75,7 +76,8 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Codable {
         case .saveProject:      return "Save Project"
         case .compileEdit:      return "Compile Edit"
         case .exportDialog:     return "Export..."
-        case .xmlExport:        return "Export XML..."
+        case .xmlExport:        return "Export Timeline"
+        case .edlExport:        return "Export EDL..."
         case .undo:             return "Undo"
         case .redo:             return "Redo"
         }
@@ -96,7 +98,7 @@ enum ShortcutAction: String, CaseIterable, Identifiable, Codable {
         case .addVideoTrack, .addAudioTrack:
             return .tracks
         case .importMedia, .saveProject, .compileEdit,
-             .exportDialog, .xmlExport:
+             .exportDialog, .xmlExport, .edlExport:
             return .file
         case .undo, .redo:
             return .history
@@ -307,6 +309,7 @@ final class KeyboardShortcutManager {
         .compileEdit:       .special(.returnKey, modifiers: .command),
         .exportDialog:      .key("e", modifiers: .command),
         .xmlExport:         .key("e", modifiers: [.command, .shift]),
+        .edlExport:        .key("e", modifiers: [.command, .option]),
 
         // History
         .undo:              .key("z", modifiers: .command),

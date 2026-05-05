@@ -1,13 +1,11 @@
 import Foundation
 import OpenTimelineIO
 
-/// Editorial interchange built from an ASWF OpenTimelineIO ``Timeline``.
+/// Editorial interchange derived from Abscido’s bridge timeline (the same layout used for playback).
 ///
-/// Swift OpenTimelineIO does not ship Python adapter plugins (`fcp_xml`, etc.). This module implements
-/// FCP 7 XML and FCPXML 1.10 by **walking the same OTIO object graph** those adapters consume, using
-/// timing rules aligned with the reference [otio-fcp-adapter](https://github.com/OpenTimelineIO/otio-fcp-adapter):
-/// **gaps occupy parent time but emit no clip row** — neighbor clipitems use `<start>`/`<end>` in
-/// parent timeline coordinates from ``Composition.rangeOfChild(index:)`` (includes gap offsets).
+/// Swift OpenTimelineIO does not ship Python adapter plugins (`fcp_xml`, etc.). FCP 7 XML and FCPXML 1.10
+/// are emitted by walking track children in order: **gaps advance the record timeline but emit no clip row**,
+/// matching common adapter semantics from [otio-fcp-adapter](https://github.com/OpenTimelineIO/otio-fcp-adapter).
 enum OTIOInterchangeExporter: Sendable {
 
     // MARK: - Public API
@@ -41,31 +39,26 @@ enum OTIOInterchangeExporter: Sendable {
         }
     }
 
-    /// Normalized OTIO track kind (`Video` / `VIDEO` / `video` → `video`).
-    private static func normalizedTrackKind(_ track: Track) -> String {
-        track.kind.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    }
-
     /// FCP 7 XML (xmeml) — DaVinci Resolve, Premiere Pro, legacy FCP.
     static func buildFCP7XML(
-        timeline: Timeline,
+        bridgeTimeline: OTIOTimeline,
         mediaFiles: [MediaFile],
         projectName: String
     ) throws -> String {
-        guard let stack = timeline.tracks else {
-            throw AbscidoError.xmlExportFailed(format: "FCP7", reason: "Timeline has no track stack.")
+        guard !bridgeTimeline.tracks.isEmpty else {
+            throw AbscidoError.xmlExportFailed(format: "FCP7", reason: "Timeline has no tracks.")
         }
 
-        let seqRate = editingRate(for: timeline)
-        let seqDurSec = try timeline.duration().toSeconds()
-        let sequenceDurationFrames = msToFrames(seqDurSec * 1000.0, fps: seqRate)
+        let seqRate = editingRate(for: bridgeTimeline)
+        let seqDurMs = bridgeTimelineDurationMs(bridgeTimeline)
+        let sequenceDurationFrames = msToFrames(seqDurMs, fps: seqRate)
 
         let fileMap = Dictionary(uniqueKeysWithValues: mediaFiles.map { ($0.id, $0) })
         let urlMap = urlIndex(mediaFiles)
 
         var mediaToFileNum: [String: Int] = [:]
         var nextFileNum = 1
-        func fileNumber(for clip: Clip) -> Int {
+        func fileNumber(for clip: OTIOClip) -> Int {
             let key = fileDedupeKey(for: clip)
             if let n = mediaToFileNum[key] { return n }
             let n = nextFileNum
@@ -82,10 +75,11 @@ enum OTIOInterchangeExporter: Sendable {
             let durFrames = msToFrames(media.durationMs, fps: fps)
             let tb = Int(round(fps))
             let ntsc = isNTSCfps(fps) ? "TRUE" : "FALSE"
+            let pathURL = interchangePathURLString(forFileURL: media.url)
             return """
                           <file id="file-\(fileNum)">
                             <name>\(escapeXML(media.url.lastPathComponent))</name>
-                            <pathurl>\(escapeXML(media.url.absoluteString))</pathurl>
+                            <pathurl>\(escapeXML(pathURL))</pathurl>
                             <duration>\(durFrames)</duration>
                             <rate>
                               <timebase>\(tb)</timebase>
@@ -107,11 +101,13 @@ enum OTIOInterchangeExporter: Sendable {
         }
 
         func clipItemXML(
-            clip: Clip,
-            timelineRange: TimeRange,
+            clip: OTIOClip,
+            tlStartMs: Double,
+            tlEndMs: Double,
             fileXML: String,
             displayName: String,
             nativeRate: Double,
+            includeVideoSourceTrack: Bool,
             includeAudioSourceTrack: Bool
         ) -> String {
             clipItemCounter += 1
@@ -121,20 +117,29 @@ enum OTIOInterchangeExporter: Sendable {
             let tb = Int(round(clipFps))
             let ntsc = isNTSCfps(clipFps) ? "TRUE" : "FALSE"
 
-            guard let sr = clip.sourceRange else { return "" }
-            let srcInMs = sr.startTime.toSeconds() * 1000.0
-            let srcOutMs = sr.endTimeExclusive().toSeconds() * 1000.0
+            let srcInMs = clip.sourceRange.startMs
+            let srcOutMs = clip.sourceRange.endMs
+            guard srcOutMs > srcInMs else { return "" }
+
             let srcIn = msToFrames(srcInMs, fps: clipFps)
             let srcOut = msToFrames(srcOutMs, fps: clipFps)
             guard srcOut > srcIn else { return "" }
 
-            let tlStartMs = timelineRange.startTime.toSeconds() * 1000.0
-            let tlEndMs = timelineRange.endTimeExclusive().toSeconds() * 1000.0
             let tlStart = msToFrames(tlStartMs, fps: seqRate)
             let tlEnd = msToFrames(tlEndMs, fps: seqRate)
             guard tlEnd > tlStart else { return "" }
 
             let durationFrames = media.map { msToFrames($0.durationMs, fps: $0.fps) } ?? msToFrames(srcOutMs - srcInMs, fps: clipFps)
+
+            var videoSourceBlock = ""
+            if includeVideoSourceTrack {
+                videoSourceBlock = """
+                            <sourcetrack>
+                              <mediatype>video</mediatype>
+                              <trackindex>1</trackindex>
+                            </sourcetrack>
+                """
+            }
 
             var audioBlock = ""
             if includeAudioSourceTrack {
@@ -163,66 +168,73 @@ enum OTIOInterchangeExporter: Sendable {
                             <out>\(srcOut)</out>
                             <start>\(tlStart)</start>
                             <end>\(tlEnd)</end>
-            \(fileXML)\(audioBlock)                          </clipitem>
+            \(fileXML)\(videoSourceBlock)\(audioBlock)                          </clipitem>
             """
         }
 
-        func innerTrackXML(track: Track, includeAudioSourceTrack: Bool) throws -> String {
+        func innerTrackXML(track: OTIOTrack, includeVideoSourceTrack: Bool, includeAudioSourceTrack: Bool) -> String {
             var inner = ""
-            let n = track.children.count
-            for i in 0..<n {
-                let child = track.children[i]
-                if child is Gap {
-                    continue
-                }
-                guard let clip = child as? Clip else { continue }
-                let tlRange = try track.rangeOfChild(index: i)
-                let nativeRate = clip.sourceRange?.duration.rate ?? seqRate
+            var timelineCursorMs = 0.0
 
-                let key = fileDedupeKey(for: clip)
-                let fn = fileNumber(for: clip)
-                let media = resolvedMedia(for: clip, fileMap: fileMap, urlMap: urlMap)
+            for item in track.children {
+                switch item {
+                case .gap(let gap):
+                    timelineCursorMs += gap.sourceRange.durationMs
+                case .clip(let clip):
+                    let durMs = clip.sourceRange.durationMs
+                    guard durMs > 0 else { continue }
 
-                let filePart: String
-                if !embeddedKeys.contains(key) {
-                    embeddedKeys.insert(key)
-                    if let media {
-                        filePart = fullFileElement(for: media, fileNum: fn)
-                    } else if let ext = clip.mediaReference as? ExternalReference,
-                              let urlStr = ext.targetURL {
-                        filePart = orphanFileElement(
-                            urlString: urlStr,
-                            name: clip.name.isEmpty ? URL(fileURLWithPath: urlStr).lastPathComponent : clip.name,
-                            fileNum: fn,
-                            nativeRate: nativeRate
-                        )
+                    let tlStartMs = timelineCursorMs
+                    let tlEndMs = tlStartMs + durMs
+                    timelineCursorMs = tlEndMs
+
+                    let nativeRate = clip.sourceRange.duration.rate > 0 ? clip.sourceRange.duration.rate : seqRate
+
+                    let key = fileDedupeKey(for: clip)
+                    let fn = fileNumber(for: clip)
+                    let media = resolvedMedia(for: clip, fileMap: fileMap, urlMap: urlMap)
+
+                    let filePart: String
+                    if !embeddedKeys.contains(key) {
+                        embeddedKeys.insert(key)
+                        if let media {
+                            filePart = fullFileElement(for: media, fileNum: fn)
+                        } else if !clip.mediaReference.targetURL.isEmpty {
+                            filePart = orphanFileElement(
+                                urlString: clip.mediaReference.targetURL,
+                                name: clip.name.isEmpty ? URL(fileURLWithPath: clip.mediaReference.targetURL).lastPathComponent : clip.name,
+                                fileNum: fn,
+                                nativeRate: nativeRate
+                            )
+                        } else {
+                            continue
+                        }
                     } else {
-                        continue
+                        filePart = "                          <file id=\"file-\(fn)\"/>\n"
                     }
-                } else {
-                    filePart = "                          <file id=\"file-\(fn)\"/>\n"
-                }
 
-                let dispName: String
-                if !clip.name.isEmpty {
-                    dispName = clip.name
-                } else if let media {
-                    dispName = media.url.lastPathComponent
-                } else if let ext = clip.mediaReference as? ExternalReference,
-                          let urlStr = ext.targetURL {
-                    dispName = URL(fileURLWithPath: urlStr).lastPathComponent
-                } else {
-                    dispName = "Clip"
-                }
+                    let dispName: String
+                    if !clip.name.isEmpty {
+                        dispName = clip.name
+                    } else if let media {
+                        dispName = media.url.lastPathComponent
+                    } else if !clip.mediaReference.targetURL.isEmpty {
+                        dispName = URL(fileURLWithPath: clip.mediaReference.targetURL).lastPathComponent
+                    } else {
+                        dispName = "Clip"
+                    }
 
-                inner += clipItemXML(
-                    clip: clip,
-                    timelineRange: tlRange,
-                    fileXML: filePart,
-                    displayName: dispName,
-                    nativeRate: nativeRate,
-                    includeAudioSourceTrack: includeAudioSourceTrack
-                )
+                    inner += clipItemXML(
+                        clip: clip,
+                        tlStartMs: tlStartMs,
+                        tlEndMs: tlEndMs,
+                        fileXML: filePart,
+                        displayName: dispName,
+                        nativeRate: nativeRate,
+                        includeVideoSourceTrack: includeVideoSourceTrack,
+                        includeAudioSourceTrack: includeAudioSourceTrack
+                    )
+                }
             }
             return inner
         }
@@ -230,26 +242,23 @@ enum OTIOInterchangeExporter: Sendable {
         var videoTrackBlocks = ""
         var audioTrackBlocks = ""
 
-        for composable in stack.children {
-            guard let track = composable as? Track else { continue }
-            switch normalizedTrackKind(track) {
-            case "video":
-                let inner = try innerTrackXML(track: track, includeAudioSourceTrack: false)
+        for track in bridgeTimeline.tracks {
+            switch track.kind {
+            case .video:
+                let inner = innerTrackXML(track: track, includeVideoSourceTrack: true, includeAudioSourceTrack: false)
                 guard !inner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 videoTrackBlocks += "                    <track>\n\(inner)\n                    </track>\n\n"
-            case "audio":
-                let inner = try innerTrackXML(track: track, includeAudioSourceTrack: true)
+            case .audio:
+                let inner = innerTrackXML(track: track, includeVideoSourceTrack: false, includeAudioSourceTrack: true)
                 guard !inner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
                 audioTrackBlocks += "                    <track>\n\(inner)\n                    </track>\n\n"
-            default:
-                break
             }
         }
 
         let tbSeq = Int(round(seqRate))
         let ntscSeq = isNTSCfps(seqRate)
 
-        let seqTitle = timeline.name.isEmpty ? "\(projectName) - Abscido Edit" : timeline.name
+        let seqTitle = bridgeTimeline.name.isEmpty ? "\(projectName) - Abscido Edit" : bridgeTimeline.name
 
         return """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -280,22 +289,18 @@ enum OTIOInterchangeExporter: Sendable {
 
     /// Final Cut Pro X library interchange (subset — single storyline from primary video track).
     static func buildFCPXML(
-        timeline: Timeline,
+        bridgeTimeline: OTIOTimeline,
         mediaFiles: [MediaFile],
         projectName: String
     ) throws -> String {
-        guard let stack = timeline.tracks else {
-            throw AbscidoError.xmlExportFailed(format: "FCPXML", reason: "Timeline has no track stack.")
-        }
-
-        guard let videoTrack = stack.children.compactMap({ $0 as? Track }).first(where: { normalizedTrackKind($0) == "video" }) else {
+        guard let videoTrack = bridgeTimeline.tracks.first(where: { $0.kind == .video }) else {
             throw AbscidoError.xmlExportFailed(format: "FCPXML", reason: "No video track present.")
         }
 
         let fileMap = Dictionary(uniqueKeysWithValues: mediaFiles.map { ($0.id, $0) })
         let urlMap = urlIndex(mediaFiles)
 
-        let seqRate = editingRate(for: timeline)
+        let seqRate = editingRate(for: bridgeTimeline)
         let frameDur = frameDurationRational(fps: seqRate)
 
         let firstDims = mediaFiles.first
@@ -308,20 +313,20 @@ enum OTIOInterchangeExporter: Sendable {
         var assetRefs: [String: String] = [:]
         var refCounter = 2
 
-        func ensureAsset(for clip: Clip) -> String? {
+        func ensureAsset(for clip: OTIOClip) -> String? {
             let key = fileDedupeKey(for: clip)
             if let existing = assetRefs[key] { return existing }
             guard let media = resolvedMedia(for: clip, fileMap: fileMap, urlMap: urlMap) else {
-                guard let ext = clip.mediaReference as? ExternalReference,
-                      let urlStr = ext.targetURL,
-                      let sr = clip.sourceRange else { return nil }
+                guard !clip.mediaReference.targetURL.isEmpty else { return nil }
+                let sr = clip.sourceRange
+                guard sr.durationMs > 0 else { return nil }
                 let assetId = "r\(refCounter)"
                 refCounter += 1
                 assetRefs[key] = assetId
-                let durMs = sr.duration.toSeconds() * 1000.0
-                let durRational = msToRationalString(durMs, fps: sr.duration.rate)
+                let durRational = msToRationalString(sr.durationMs, fps: sr.duration.rate)
+                let srcURL = interchangePathURLString(fromRawPath: clip.mediaReference.targetURL)
                 resources += """
-                      <asset id="\(assetId)" src="\(escapeXML(urlStr))" duration="\(durRational)" hasVideo="1" hasAudio="1"/>
+                      <asset id="\(assetId)" src="\(escapeXML(srcURL))" duration="\(durRational)" hasVideo="1" hasAudio="1"/>
 
                 """
                 return assetId
@@ -329,7 +334,7 @@ enum OTIOInterchangeExporter: Sendable {
             let assetId = "r\(refCounter)"
             refCounter += 1
             assetRefs[key] = assetId
-            let fileURL = media.url.absoluteString
+            let fileURL = interchangePathURLString(forFileURL: media.url)
             let durRational = msToRationalString(media.durationMs, fps: media.fps)
             resources += """
                   <asset id="\(assetId)" src="\(escapeXML(fileURL))" duration="\(durRational)" hasVideo="1" hasAudio="1"/>
@@ -340,35 +345,39 @@ enum OTIOInterchangeExporter: Sendable {
 
         var spine = ""
         var sequenceEndMs = 0.0
+        var timelineCursorMs = 0.0
 
-        let n = videoTrack.children.count
-        for i in 0..<n {
-            let child = videoTrack.children[i]
-            if child is Gap {
-                continue
+        for item in videoTrack.children {
+            switch item {
+            case .gap(let gap):
+                timelineCursorMs += gap.sourceRange.durationMs
+            case .clip(let clip):
+                guard clip.sourceRange.durationMs > 0 else { continue }
+                guard let assetId = ensureAsset(for: clip) else {
+                    timelineCursorMs += clip.sourceRange.durationMs
+                    continue
+                }
+
+                let offsetMs = timelineCursorMs
+                let endMs = offsetMs + clip.sourceRange.durationMs
+                sequenceEndMs = max(sequenceEndMs, endMs)
+                timelineCursorMs = endMs
+
+                let sr = clip.sourceRange
+                let durationRational = msToRationalString(sr.durationMs, fps: sr.duration.rate)
+                let startRational = msToRationalString(sr.startMs, fps: sr.duration.rate)
+                let offsetRational = msToRationalString(offsetMs, fps: seqRate)
+
+                spine += """
+                            <asset-clip ref="\(assetId)" offset="\(offsetRational)" duration="\(durationRational)" start="\(startRational)"/>
+
+                """
             }
-            guard let clip = child as? Clip,
-                  let sr = clip.sourceRange,
-                  let assetId = ensureAsset(for: clip) else { continue }
-
-            let tlRange = try videoTrack.rangeOfChild(index: i)
-            let offsetMs = tlRange.startTime.toSeconds() * 1000.0
-            let endMs = tlRange.endTimeExclusive().toSeconds() * 1000.0
-            sequenceEndMs = max(sequenceEndMs, endMs)
-
-            let durationRational = msToRationalString(sr.duration.toSeconds() * 1000.0, fps: sr.duration.rate)
-            let startRational = msToRationalString(sr.startTime.toSeconds() * 1000.0, fps: sr.duration.rate)
-            let offsetRational = msToRationalString(offsetMs, fps: seqRate)
-
-            spine += """
-                        <asset-clip ref="\(assetId)" offset="\(offsetRational)" duration="\(durationRational)" start="\(startRational)"/>
-
-            """
         }
 
-        let totalTimelineMs = max(sequenceEndMs, try timeline.duration().toSeconds() * 1000.0)
+        let totalTimelineMs = max(sequenceEndMs, bridgeTimelineDurationMs(bridgeTimeline))
         let totalDurRational = msToRationalString(totalTimelineMs, fps: seqRate)
-        let seqTitle = timeline.name.isEmpty ? "\(projectName) - Abscido Edit" : timeline.name
+        let seqTitle = bridgeTimeline.name.isEmpty ? "\(projectName) - Abscido Edit" : bridgeTimeline.name
 
         return """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -390,34 +399,126 @@ enum OTIOInterchangeExporter: Sendable {
         """
     }
 
+    /// CMX 3600-style EDL from the first video track (Resolve / Premiere compatible subset).
+    static func buildCMX3600EDL(
+        bridgeTimeline: OTIOTimeline,
+        mediaFiles: [MediaFile],
+        projectName: String
+    ) throws -> String {
+        guard let videoTrack = bridgeTimeline.tracks.first(where: { $0.kind == .video }) else {
+            throw AbscidoError.exportFailed(reason: "No video track for EDL export.")
+        }
+
+        let seqRate = editingRate(for: bridgeTimeline)
+        let fileMap = Dictionary(uniqueKeysWithValues: mediaFiles.map { ($0.id, $0) })
+        let urlMap = urlIndex(mediaFiles)
+
+        var lines: [String] = []
+        lines.append("TITLE: \(String(projectName.prefix(60)))")
+        lines.append("FCM: NON-DROP FRAME")
+        lines.append("")
+
+        var eventNum = 1
+        var timelineCursorMs = 0.0
+
+        for item in videoTrack.children {
+            switch item {
+            case .gap(let gap):
+                timelineCursorMs += gap.sourceRange.durationMs
+            case .clip(let clip):
+                let durMs = clip.sourceRange.durationMs
+                guard durMs > 0 else { continue }
+
+                let srcInMs = clip.sourceRange.startMs
+                let srcOutMs = clip.sourceRange.endMs
+                let recInMs = timelineCursorMs
+                let recOutMs = recInMs + durMs
+                timelineCursorMs = recOutMs
+
+                guard srcOutMs > srcInMs, recOutMs > recInMs else { continue }
+
+                let srcIn = msToFrames(srcInMs, fps: seqRate)
+                let srcOut = msToFrames(srcOutMs, fps: seqRate)
+                let recIn = msToFrames(recInMs, fps: seqRate)
+                let recOut = msToFrames(recOutMs, fps: seqRate)
+
+                let dispName: String
+                if let m = resolvedMedia(for: clip, fileMap: fileMap, urlMap: urlMap) {
+                    dispName = m.url.lastPathComponent
+                } else if !clip.mediaReference.targetURL.isEmpty {
+                    dispName = URL(fileURLWithPath: clip.mediaReference.targetURL).lastPathComponent
+                } else {
+                    dispName = clip.name.isEmpty ? "CLIP" : clip.name
+                }
+
+                let evt = String(format: "%03d", eventNum)
+                lines.append("\(evt)  AX       V     C        \(edlTimecode(frames: srcIn, fps: seqRate)) \(edlTimecode(frames: srcOut, fps: seqRate)) \(edlTimecode(frames: recIn, fps: seqRate)) \(edlTimecode(frames: recOut, fps: seqRate))")
+                lines.append("* FROM CLIP NAME: \(dispName)")
+                lines.append("")
+                eventNum += 1
+            }
+        }
+
+        guard eventNum > 1 else {
+            throw AbscidoError.exportFailed(reason: "Timeline has no clips for EDL export.")
+        }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
     // MARK: - Timing / media helpers
 
-    /// Sequence timebase for xmeml — must match real clip rates (e.g. 100 fps).
-    ///
-    /// ``Timeline`` defaults `globalStartTime` to rate **24**; using that while clips run at 100 fps
-    /// yields invalid FCP XML and DaVinci Resolve often shows an empty timeline. Prefer the first
-    /// clip's `source_range` rate, then fall back to global start or 24.
-    private static func editingRate(for timeline: Timeline) -> Double {
-        guard let stack = timeline.tracks else { return 24 }
-        var fromClip: Double?
-        for composable in stack.children {
-            guard let track = composable as? Track else { continue }
-            for i in 0..<track.children.count {
-                guard let clip = track.children[i] as? Clip,
-                      let sr = clip.sourceRange,
-                      sr.duration.rate > 0 else { continue }
-                fromClip = sr.duration.rate
-                break
+    /// Sequence timebase for xmeml — prefer the first clip’s frame rate so Resolve/Premiere agree with trimmed ranges.
+    private static func editingRate(for bridge: OTIOTimeline) -> Double {
+        for track in bridge.tracks {
+            for item in track.children {
+                if case .clip(let clip) = item {
+                    let rate = clip.sourceRange.duration.rate
+                    if rate > 0 { return rate }
+                }
             }
-            if fromClip != nil { break }
-        }
-        if let r = fromClip, r > 0 {
-            return r
-        }
-        if let gst = timeline.globalStartTime, gst.rate > 0 {
-            return gst.rate
         }
         return 24
+    }
+
+    private static func bridgeTimelineDurationMs(_ bridge: OTIOTimeline) -> Double {
+        bridge.tracks.map { trackDurationMs($0) }.max() ?? 0
+    }
+
+    private static func trackDurationMs(_ track: OTIOTrack) -> Double {
+        track.children.reduce(0) { partial, item in
+            switch item {
+            case .gap(let g): return partial + g.sourceRange.durationMs
+            case .clip(let c): return partial + c.sourceRange.durationMs
+            }
+        }
+    }
+
+    private static func interchangePathURLString(forFileURL url: URL) -> String {
+        url.standardizedFileURL.absoluteString
+    }
+
+    /// Normalizes stored paths (`file:///…`, `/Volumes/…`, or bare POSIX paths) for interchange URLs.
+    private static func interchangePathURLString(fromRawPath raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return raw }
+        if trimmed.hasPrefix("file:"), let u = URL(string: trimmed) {
+            return u.standardizedFileURL.absoluteString
+        }
+        return URL(fileURLWithPath: trimmed).standardizedFileURL.absoluteString
+    }
+
+    private static func edlTimecode(frames: Int64, fps: Double) -> String {
+        let fpsInt = max(1, Int(round(fps)))
+        var f = frames
+        var ff = f % Int64(fpsInt)
+        if ff < 0 { ff += Int64(fpsInt); f -= Int64(fpsInt) }
+        f /= Int64(fpsInt)
+        let s = f % 60
+        f /= 60
+        let m = f % 60
+        let h = f / 60
+        return String(format: "%02d:%02d:%02d:%02d", Int(h), Int(m), Int(s), Int(ff))
     }
 
     private static func urlIndex(_ mediaFiles: [MediaFile]) -> [String: MediaFile] {
@@ -438,40 +539,26 @@ enum OTIOInterchangeExporter: Sendable {
         return u.standardizedFileURL.absoluteString.lowercased()
     }
 
-    private static func abscidoMediaFileId(_ clip: Clip) -> Int64? {
-        let meta = clip.metadata
-        if let v = meta["abscido_mediaFileId"] as? Int64 { return v }
-        if let n = meta["abscido_mediaFileId"] as? NSNumber { return n.int64Value }
-        if let s = meta["abscido_mediaFileId"] as? String { return Int64(s) }
-        return nil
+    private static func fileDedupeKey(for clip: OTIOClip) -> String {
+        if clip.mediaFileId != 0 {
+            return "abscido:\(clip.mediaFileId)"
+        }
+        if !clip.mediaReference.targetURL.isEmpty {
+            return "url:\(normalizeURLKey(clip.mediaReference.targetURL))"
+        }
+        return "unknown:\(clip.name)_\(clip.sourceRange.startMs)"
     }
 
-    private static func fileDedupeKey(for clip: Clip) -> String {
-        if let id = abscidoMediaFileId(clip) {
-            return "abscido:\(id)"
-        }
-        if let ext = clip.mediaReference as? ExternalReference, let u = ext.targetURL {
-            return "url:\(normalizeURLKey(u))"
-        }
-        return "unknown:\(ObjectIdentifier(clip).debugDescription)"
-    }
-
-    private static func resolvedMedia(for clip: Clip, fileMap: [Int64: MediaFile], urlMap: [String: MediaFile]) -> MediaFile? {
-        if let id = abscidoMediaFileId(clip), let f = fileMap[id] { return f }
-        guard let ext = clip.mediaReference as? ExternalReference,
-              let urlStr = ext.targetURL else { return nil }
-        return urlMap[normalizeURLKey(urlStr)]
+    private static func resolvedMedia(for clip: OTIOClip, fileMap: [Int64: MediaFile], urlMap: [String: MediaFile]) -> MediaFile? {
+        if clip.mediaFileId != 0, let f = fileMap[clip.mediaFileId] { return f }
+        guard !clip.mediaReference.targetURL.isEmpty else { return nil }
+        return urlMap[normalizeURLKey(clip.mediaReference.targetURL)]
     }
 
     private static func orphanFileElement(urlString: String, name: String, fileNum: Int, nativeRate: Double) -> String {
         let tb = Int(round(nativeRate))
         let ntsc = isNTSCfps(nativeRate) ? "TRUE" : "FALSE"
-        let resolvedURL: String
-        if let u = URL(string: urlString), u.scheme != nil {
-            resolvedURL = u.absoluteString
-        } else {
-            resolvedURL = URL(fileURLWithPath: urlString).absoluteString
-        }
+        let resolvedURL = interchangePathURLString(fromRawPath: urlString)
         return """
                           <file id="file-\(fileNum)">
                             <name>\(escapeXML(name))</name>

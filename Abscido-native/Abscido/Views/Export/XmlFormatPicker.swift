@@ -6,6 +6,7 @@ enum XmlExportFormat: String, CaseIterable, Identifiable {
     case fcp7 = "Premiere Pro / Resolve (FCP7 XML)"
     case fcpxml = "Final Cut Pro X (FCPXML)"
     case both = "FCP7 XML + FCPXML"
+    case edl = "EDL (CMX 3600)"
     case otio = "OpenTimelineIO (.otio)"
 
     var id: String { rawValue }
@@ -15,6 +16,7 @@ enum XmlExportFormat: String, CaseIterable, Identifiable {
         case .fcp7: return "xml"
         case .fcpxml: return "fcpxml"
         case .both: return "xml"
+        case .edl: return "edl"
         case .otio: return "otio"
         }
     }
@@ -77,6 +79,8 @@ struct XmlFormatPicker: View {
             panel.allowedContentTypes = [
                 UTType(tag: "fcpxml", tagClass: .filenameExtension, conformingTo: .xml) ?? .xml,
             ]
+        case .edl:
+            panel.allowedContentTypes = [UTType(filenameExtension: "edl") ?? .plainText]
         case .otio:
             panel.allowedContentTypes = [
                 UTType(tag: "otio", tagClass: .filenameExtension, conformingTo: .json) ?? .json,

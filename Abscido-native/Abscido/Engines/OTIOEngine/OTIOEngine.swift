@@ -1097,7 +1097,7 @@ actor OTIOEngine {
         }
 
         // Convert bridge model → real OTIO Timeline
-        let otioTimeline = tl.toOTIOTimeline()
+        let otioTimeline = try tl.toOTIOTimeline()
 
         // Serialize to .otio JSON
         let jsonString = try otioTimeline.toJSON()

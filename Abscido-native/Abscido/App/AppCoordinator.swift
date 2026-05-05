@@ -1,5 +1,7 @@
 import SwiftUI
 import Combine
+import AppKit
+import UniformTypeIdentifiers
 
 /// Root coordinator — manages window state, shared actions, and error presentation.
 @MainActor
@@ -173,46 +175,78 @@ final class AppCoordinator {
         let seqName = "\(project.name) - Abscido Edit"
         Task { @MainActor in
             do {
-                let timeline = try await timelineVM.openTimelineForInterchangeExport(sequenceDisplayName: seqName)
                 switch format {
+                case .otio:
+                    let timeline = try await timelineVM.openTimelineForInterchangeExport(sequenceDisplayName: seqName)
+                    try await engine.exportOTIOJSON(timeline: timeline, outputURL: outputURL)
                 case .fcp7:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        self.errorMessage = "No timeline loaded."
+                        return
+                    }
                     try await engine.exportFcp7XML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: outputURL
                     )
                 case .fcpxml:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        self.errorMessage = "No timeline loaded."
+                        return
+                    }
                     try await engine.exportFCPXML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: outputURL
                     )
                 case .both:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        self.errorMessage = "No timeline loaded."
+                        return
+                    }
                     let fcp7URL = outputURL.deletingPathExtension().appendingPathExtension("xml")
                     let fcpxURL = outputURL.deletingPathExtension().appendingPathExtension("fcpxml")
                     try await engine.exportFcp7XML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: fcp7URL
                     )
                     try await engine.exportFCPXML(
-                        timeline: timeline,
+                        bridgeTimeline: bridge,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: fcpxURL
                     )
-                case .otio:
-                    try await engine.exportOTIOJSON(timeline: timeline, outputURL: outputURL)
+                case .edl:
+                    guard let bridge = await timelineVM.otioEngine.currentTimeline() else {
+                        self.errorMessage = "No timeline loaded."
+                        return
+                    }
+                    try await engine.exportEDL(
+                        bridgeTimeline: bridge,
+                        mediaFiles: projectVM.mediaFiles,
+                        projectName: project.name,
+                        outputURL: outputURL
+                    )
                 }
             } catch {
-                await MainActor.run {
-                    self.errorMessage = error.localizedDescription
-                }
+                self.errorMessage = error.localizedDescription
             }
         }
+    }
+
+    /// Presents a save panel and writes a CMX-style EDL from the first video track.
+    func presentEDLExport() {
+        guard let project = projectVM.currentProject else { return }
+        let panel = NSSavePanel()
+        panel.canCreateDirectories = true
+        panel.nameFieldStringValue = "\(project.name)_abscido.edl"
+        panel.allowedContentTypes = [UTType(filenameExtension: "edl") ?? .plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportXML(format: .edl, outputURL: url)
     }
 
     func clearError() {

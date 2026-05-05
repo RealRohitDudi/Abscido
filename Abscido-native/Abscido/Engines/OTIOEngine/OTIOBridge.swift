@@ -168,7 +168,7 @@ struct OTIOTimeline: Codable, Equatable, Sendable {
 
 extension OTIOTimeline {
     /// Converts this bridge timeline to a real OpenTimelineIO Timeline object.
-    func toOTIOTimeline() -> OpenTimelineIO.Timeline {
+    func toOTIOTimeline() throws -> OpenTimelineIO.Timeline {
         let otioTimeline = OpenTimelineIO.Timeline(name: name)
 
         if otioTimeline.tracks == nil {
@@ -198,15 +198,15 @@ extension OTIOTimeline {
                     if let lgId = clipData.linkGroupId {
                         otioClip.metadata["abscido_linkGroupId"] = lgId
                     }
-                    try? otioTrack.append(child: otioClip)
+                    try otioTrack.append(child: otioClip)
 
                 case .gap(let gapData):
                     let otioGap = OpenTimelineIO.Gap(sourceRange: gapData.sourceRange.toTimeRange())
-                    try? otioTrack.append(child: otioGap)
+                    try otioTrack.append(child: otioGap)
                 }
             }
 
-            try? stack.append(child: otioTrack)
+            try stack.append(child: otioTrack)
         }
 
         return otioTimeline

@@ -113,7 +113,7 @@ final class TimelineViewModel {
         guard let bridge = await otioEngine.currentTimeline() else {
             throw AbscidoError.exportFailed(reason: "No timeline loaded.")
         }
-        let tl = bridge.toOTIOTimeline()
+        let tl = try bridge.toOTIOTimeline()
         tl.name = sequenceDisplayName
         // Timeline() defaults global_start to 24 fps; align with actual clip rate for interchange.
         if let stack = tl.tracks {
