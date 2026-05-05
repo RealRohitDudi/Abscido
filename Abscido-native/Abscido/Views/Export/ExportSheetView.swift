@@ -2,6 +2,8 @@ import SwiftUI
 
 /// Export panel with render and XML export options.
 struct ExportSheetView: View {
+    @Environment(\.dismiss) private var dismiss
+
     @Bindable var projectVM: ProjectViewModel
     @Bindable var transcriptVM: TranscriptViewModel
     @Bindable var timelineVM: TimelineViewModel
@@ -16,10 +18,25 @@ struct ExportSheetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Export")
-                .font(.caption)
-                .fontWeight(.semibold)
-                .foregroundColor(.secondary)
+            HStack(alignment: .center, spacing: 8) {
+                Text("Export")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.secondary)
+                Spacer(minLength: 8)
+                Button {
+                    dismiss()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .symbolRenderingMode(.hierarchical)
+                        .font(.system(size: 16))
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut(.cancelAction)
+                .help("Close")
+                .accessibilityLabel("Close export")
+            }
 
             // Render export
             HStack(spacing: 12) {
@@ -49,12 +66,12 @@ struct ExportSheetView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "doc.text")
                         .font(.caption)
-                    Text("Export XML...")
+                    Text("Export interchange…")
                         .font(.caption)
                 }
             }
             .buttonStyle(.bordered)
-            .disabled(!transcriptVM.hasTranscript)
+            .disabled(projectVM.currentProject == nil)
             .sheet(isPresented: $showXmlPicker) {
                 XmlFormatPicker(
                     projectName: projectVM.currentProject?.name ?? "Untitled",
@@ -119,21 +136,21 @@ struct ExportSheetView: View {
     private func handleXmlExport(format: XmlExportFormat, outputURL: URL) {
         guard let project = projectVM.currentProject else { return }
 
-        let edl = transcriptVM.computeAllEditDecisions(mediaFiles: projectVM.mediaFiles)
-
-        Task {
+        Task { @MainActor in
+            let seqName = "\(project.name) - Abscido Edit"
             do {
+                let timeline = try await timelineVM.openTimelineForInterchangeExport(sequenceDisplayName: seqName)
                 switch format {
                 case .fcp7:
                     try await exportEngine.exportFcp7XML(
-                        editDecisions: edl,
+                        timeline: timeline,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: outputURL
                     )
                 case .fcpxml:
                     try await exportEngine.exportFCPXML(
-                        editDecisions: edl,
+                        timeline: timeline,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: outputURL
@@ -142,19 +159,21 @@ struct ExportSheetView: View {
                     let fcp7URL = outputURL.deletingPathExtension().appendingPathExtension("xml")
                     let fcpxURL = outputURL.deletingPathExtension().appendingPathExtension("fcpxml")
                     try await exportEngine.exportFcp7XML(
-                        editDecisions: edl,
+                        timeline: timeline,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: fcp7URL
                     )
                     try await exportEngine.exportFCPXML(
-                        editDecisions: edl,
+                        timeline: timeline,
                         mediaFiles: projectVM.mediaFiles,
                         projectName: project.name,
                         outputURL: fcpxURL
                     )
+                case .otio:
+                    try await exportEngine.exportOTIOJSON(timeline: timeline, outputURL: outputURL)
                 }
-                exportMessage = "XML exported successfully"
+                exportMessage = "Exported successfully"
             } catch {
                 exportMessage = "Error: \(error.localizedDescription)"
             }

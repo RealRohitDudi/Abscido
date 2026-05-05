@@ -171,6 +171,13 @@ extension OTIOTimeline {
     func toOTIOTimeline() -> OpenTimelineIO.Timeline {
         let otioTimeline = OpenTimelineIO.Timeline(name: name)
 
+        if otioTimeline.tracks == nil {
+            otioTimeline.tracks = Stack(name: "tracks")
+        }
+        guard let stack = otioTimeline.tracks else {
+            return otioTimeline
+        }
+
         for track in tracks {
             let otioTrack = OpenTimelineIO.Track(
                 name: track.name,
@@ -186,8 +193,8 @@ extension OTIOTimeline {
                         mediaReference: extRef,
                         sourceRange: clipData.sourceRange.toTimeRange()
                     )
-                    // Store custom metadata for mediaFileId and linkGroupId
-                    otioClip.metadata["abscido_mediaFileId"] = Int64(clipData.mediaFileId)
+                    // Store as String — native OTIO JSON codec is finicky with custom int metadata on clips.
+                    otioClip.metadata["abscido_mediaFileId"] = String(clipData.mediaFileId)
                     if let lgId = clipData.linkGroupId {
                         otioClip.metadata["abscido_linkGroupId"] = lgId
                     }
@@ -199,9 +206,7 @@ extension OTIOTimeline {
                 }
             }
 
-            if let stack = otioTimeline.tracks {
-                try? stack.append(child: otioTrack)
-            }
+            try? stack.append(child: otioTrack)
         }
 
         return otioTimeline
@@ -237,6 +242,10 @@ extension OTIOTimeline {
                         var mediaFileId: Int64 = 0
                         if let id = clip.metadata["abscido_mediaFileId"] as? Int64 {
                             mediaFileId = id
+                        } else if let n = clip.metadata["abscido_mediaFileId"] as? NSNumber {
+                            mediaFileId = n.int64Value
+                        } else if let s = clip.metadata["abscido_mediaFileId"] as? String, let parsed = Int64(s) {
+                            mediaFileId = parsed
                         }
 
                         var linkGroupId: String?

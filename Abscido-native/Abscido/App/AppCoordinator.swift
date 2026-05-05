@@ -167,6 +167,54 @@ final class AppCoordinator {
         timelineVM.zoomOut()
     }
 
+    func exportXML(format: XmlExportFormat, outputURL: URL) {
+        guard let project = projectVM.currentProject else { return }
+        let engine = ExportEngine()
+        let seqName = "\(project.name) - Abscido Edit"
+        Task { @MainActor in
+            do {
+                let timeline = try await timelineVM.openTimelineForInterchangeExport(sequenceDisplayName: seqName)
+                switch format {
+                case .fcp7:
+                    try await engine.exportFcp7XML(
+                        timeline: timeline,
+                        mediaFiles: projectVM.mediaFiles,
+                        projectName: project.name,
+                        outputURL: outputURL
+                    )
+                case .fcpxml:
+                    try await engine.exportFCPXML(
+                        timeline: timeline,
+                        mediaFiles: projectVM.mediaFiles,
+                        projectName: project.name,
+                        outputURL: outputURL
+                    )
+                case .both:
+                    let fcp7URL = outputURL.deletingPathExtension().appendingPathExtension("xml")
+                    let fcpxURL = outputURL.deletingPathExtension().appendingPathExtension("fcpxml")
+                    try await engine.exportFcp7XML(
+                        timeline: timeline,
+                        mediaFiles: projectVM.mediaFiles,
+                        projectName: project.name,
+                        outputURL: fcp7URL
+                    )
+                    try await engine.exportFCPXML(
+                        timeline: timeline,
+                        mediaFiles: projectVM.mediaFiles,
+                        projectName: project.name,
+                        outputURL: fcpxURL
+                    )
+                case .otio:
+                    try await engine.exportOTIOJSON(timeline: timeline, outputURL: outputURL)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
     func clearError() {
         errorMessage = nil
     }

@@ -48,8 +48,8 @@ struct ToolbarView: ViewModifier {
                     Button(action: onExport) {
                         Label("Export", systemImage: "square.and.arrow.up")
                     }
-                    .disabled(!transcriptVM.hasTranscript)
-                    .help("Export (⌘E)")
+                    .disabled(projectVM.currentProject == nil)
+                    .help("Export timeline / render (⌘E)")
                 }
             }
     }

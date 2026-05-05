@@ -1,4 +1,5 @@
 import Foundation
+import OpenTimelineIO
 
 /// Maps OTIO timeline state to UI-friendly multi-track models.
 /// Manages clip selection, clipboard, and all NLE operations.
@@ -105,6 +106,30 @@ final class TimelineViewModel {
     /// Encodes the current timeline for `projects.otio_json`.
     func exportBridgeJSONForPersistence() async throws -> String {
         try await otioEngine.exportBridgeJSON()
+    }
+
+    /// Canonical OpenTimelineIO graph for interchange export (``.otio``, FCP XML derived writers).
+    func openTimelineForInterchangeExport(sequenceDisplayName: String) async throws -> Timeline {
+        guard let bridge = await otioEngine.currentTimeline() else {
+            throw AbscidoError.exportFailed(reason: "No timeline loaded.")
+        }
+        let tl = bridge.toOTIOTimeline()
+        tl.name = sequenceDisplayName
+        // Timeline() defaults global_start to 24 fps; align with actual clip rate for interchange.
+        if let stack = tl.tracks {
+            outer: for composable in stack.children {
+                guard let track = composable as? Track else { continue }
+                for i in 0..<track.children.count {
+                    if let clip = track.children[i] as? Clip,
+                       let sr = clip.sourceRange,
+                       sr.duration.rate > 0 {
+                        tl.globalStartTime = RationalTime(value: 0, rate: sr.duration.rate)
+                        break outer
+                    }
+                }
+            }
+        }
+        return tl
     }
 
     func rebuild(editDecisions: [EditDecision], mediaFiles: [MediaFile]) {

@@ -41,6 +41,23 @@ struct ContentView: View {
         .sheet(isPresented: $coord.showKeyboardShortcuts) {
             KeyboardShortcutsView()
         }
+        .sheet(isPresented: $coord.showExport) {
+            ExportSheetView(
+                projectVM: coord.projectVM,
+                transcriptVM: coord.transcriptVM,
+                timelineVM: coord.timelineVM
+            )
+            .padding(24)
+            .frame(minWidth: 420)
+        }
+        .sheet(isPresented: $coord.showXmlExport) {
+            XmlFormatPicker(
+                projectName: coord.projectVM.currentProject?.name ?? "Untitled",
+                onExport: { format, url in
+                    coord.exportXML(format: format, outputURL: url)
+                }
+            )
+        }
         .onChange(of: coord.showImportPanel) { _, show in
             if show {
                 coord.importMedia()
