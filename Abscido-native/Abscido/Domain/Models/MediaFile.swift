@@ -28,6 +28,35 @@ struct MediaFile: Identifiable, Codable, Equatable, Sendable, Transferable {
         URL(fileURLWithPath: filePath)
     }
 
+    /// Runs `body` against a URL the sandbox allows reading. Imported files store a security-scoped
+    /// bookmark; without `startAccessingSecurityScopedResource`, Speech and AVFoundation can hang or fail.
+    func withReadableFileURL<R: Sendable>(
+        _ body: @Sendable (URL) async throws -> R
+    ) async throws -> R {
+        guard let data = bookmarkData else {
+            return try await body(url)
+        }
+
+        var stale = false
+        do {
+            let scoped = try URL(
+                resolvingBookmarkData: data,
+                options: .withSecurityScope,
+                relativeTo: nil,
+                bookmarkDataIsStale: &stale
+            )
+            let started = scoped.startAccessingSecurityScopedResource()
+            defer {
+                if started {
+                    scoped.stopAccessingSecurityScopedResource()
+                }
+            }
+            return try await body(scoped)
+        } catch {
+            return try await body(url)
+        }
+    }
+
     var formattedDuration: String {
         let totalSeconds = durationMs / 1000.0
         let hours = Int(totalSeconds) / 3600

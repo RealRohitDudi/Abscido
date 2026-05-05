@@ -72,15 +72,12 @@ struct MediaBinView: View {
                                         }
                                 }
                             }
-                            // Tappable pad below the last clip — clears selection and returns player to program.
-                            let rowEstimate: CGFloat = 56
-                            Color.clear
-                                .contentShape(Rectangle())
-                                .frame(maxWidth: .infinity)
-                                .frame(minHeight: max(48, geo.size.height - CGFloat(mediaFiles.count) * rowEstimate))
-                                .onTapGesture {
-                                    selectedId = nil
-                                }
+                            // Consume remaining vertical space without clearing bin selection —
+                            // a full-height invisible tap target made Transcribe look "broken"
+                            // (toolbar requires a selected clip).
+                            Spacer(minLength: 8)
+                                .frame(maxWidth: .infinity, minHeight: 24)
+                                .allowsHitTesting(false)
                         }
                         .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
                     }

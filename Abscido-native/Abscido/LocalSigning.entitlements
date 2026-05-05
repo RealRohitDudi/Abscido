@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Used only for ad-hoc re-sign after `swift build` (see scripts/run-with-speech-capability.sh).
+	  Full release signing uses Abscido.entitlements (app sandbox). On recent macOS, TCC validates
+	  `com.apple.security.personal-information.speech-recognition` against the *signed* entitlement
+	  blob alongside embedded usage strings — the strip SwiftPM attaches by default lacks it and can
+	  trip __TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__. We intentionally omit sandbox here so `swift`
+	  dev builds keep broad filesystem access; Xcode/shipped builds remain sandboxed.
+	-->
+	<key>com.apple.security.get-task-allow</key>
+	<true/>
+	<key>com.apple.security.personal-information.speech-recognition</key>
+	<true/>
+</dict>
+</plist>

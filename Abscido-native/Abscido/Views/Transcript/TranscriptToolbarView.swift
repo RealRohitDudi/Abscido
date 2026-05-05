@@ -1,14 +1,36 @@
 import SwiftUI
 
-/// Toolbar above the transcript editor: language picker, transcribe button, AI button.
+/// Toolbar above the transcript editor.
+/// Contains: language picker, engine picker, model picker (WhisperKit), transcribe/cancel button,
+/// AI button, word count, selection count, and an inline error banner.
 struct TranscriptToolbarView: View {
     @Bindable var transcriptVM: TranscriptViewModel
     @Bindable var aiVM: AIViewModel
+    /// Highlighted clip in the Media Bin (nil if none selected).
     var selectedMediaFile: MediaFile?
+    /// Actual file used for transcription: selection, else first clip in bin.
+    var transcribeTargetMedia: MediaFile?
+    var mediaFileCount: Int
     var onTranscribe: () -> Void
 
+    private var canTranscribe: Bool {
+        transcribeTargetMedia != nil && !transcriptVM.isTranscribing
+    }
+
     var body: some View {
-        HStack(spacing: 12) {
+        VStack(spacing: 0) {
+            mainToolbar
+            if let error = transcriptVM.transcriptionError {
+                errorBanner(message: error)
+            }
+        }
+    }
+
+    // MARK: - Main Toolbar
+
+    private var mainToolbar: some View {
+        HStack(spacing: 8) {
+
             // Language picker
             Picker("Language", selection: $transcriptVM.selectedLanguage) {
                 ForEach(LanguageRegistry.languages) { lang in
@@ -16,29 +38,42 @@ struct TranscriptToolbarView: View {
                 }
             }
             .pickerStyle(.menu)
-            .frame(width: 140)
+            .frame(width: 130)
+            .help("Transcription language")
 
-            Divider()
-                .frame(height: 20)
-
-            // Transcribe button
-            Button(action: onTranscribe) {
-                HStack(spacing: 4) {
-                    if transcriptVM.isTranscribing {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                            .frame(width: 14, height: 14)
-                    } else {
-                        Image(systemName: "waveform")
-                            .font(.caption)
-                    }
-                    Text("Transcribe")
-                        .font(.caption)
+            // Engine picker
+            Picker("Engine", selection: $transcriptVM.selectedBackend) {
+                ForEach(TranscriptionBackend.allCases, id: \.self) { backend in
+                    Text(backend.displayName).tag(backend)
                 }
             }
-            .disabled(selectedMediaFile == nil || transcriptVM.isTranscribing)
-            .buttonStyle(.bordered)
-            .tint(Color(red: 0.486, green: 0.424, blue: 0.980))
+            .pickerStyle(.menu)
+            .frame(width: 190)
+            .help(enginePickerHelp)
+            .disabled(transcriptVM.isTranscribing)
+
+            // WhisperKit model size picker (only visible when WhisperKit is selected)
+            if transcriptVM.selectedBackend == .whisperKit {
+                Picker("Model", selection: $transcriptVM.whisperKitModelSize) {
+                    ForEach(WhisperKitModelSize.allCases, id: \.self) { size in
+                        Text(size.shortLabel).tag(size)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 68)
+                .help(modelPickerHelp)
+                .disabled(transcriptVM.isTranscribing)
+                .transition(.opacity)
+            }
+
+            divider
+
+            // Transcribe / Cancel button
+            if transcriptVM.isTranscribing {
+                cancelButton
+            } else {
+                transcribeCluster
+            }
 
             // AI Bad Takes button
             Button(action: {
@@ -59,10 +94,109 @@ struct TranscriptToolbarView: View {
             }
             .disabled(!transcriptVM.hasTranscript || aiVM.isDetecting)
             .buttonStyle(.bordered)
+            .help("AI-powered bad take detection via Anthropic Claude")
 
             Spacer()
 
-            // Word count
+            statusLabels
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(red: 0.141, green: 0.141, blue: 0.141))
+        .animation(.easeInOut(duration: 0.15), value: transcriptVM.selectedBackend)
+    }
+
+    // MARK: - Help Strings
+
+    private var enginePickerHelp: String {
+        switch transcriptVM.selectedBackend {
+        case .whisperKit:
+            return "WhisperKit: on-device CoreML, no internet after first model download, no signing required. Recommended."
+        case .appleSpeech:
+            return "Apple Speech: built-in, fast, requires the binary to carry a speech entitlement — launch via ./scripts/run-with-speech-capability.sh."
+        case .mlxWhisper:
+            return "MLX-Whisper: Python subprocess (pip install mlx-whisper). Development only; blocked in sandboxed builds."
+        }
+    }
+
+    private var modelPickerHelp: String {
+        switch transcriptVM.whisperKitModelSize {
+        case .tiny:  return "Tiny model (~75 MB). Fastest transcription; good for quick drafts."
+        case .base:  return "Base model (~150 MB). Best balance of speed and accuracy. Recommended."
+        case .small: return "Small model (~480 MB). Higher accuracy for difficult audio; slower."
+        }
+    }
+
+    // MARK: - Buttons
+
+    private var transcribeCluster: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Button(action: onTranscribe) {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform")
+                        .font(.caption)
+                    Text("Transcribe")
+                        .font(.caption)
+                }
+            }
+            .disabled(!canTranscribe)
+            .buttonStyle(.bordered)
+            .tint(Color(red: 0.486, green: 0.424, blue: 0.980))
+            .help(transcribeTooltip)
+
+            if !transcriptVM.isTranscribing, mediaFileCount > 0, let target = transcribeTargetMedia {
+                let usingFallbackSelection = selectedMediaFile == nil
+                    || selectedMediaFile?.id != transcribeTargetMedia?.id
+
+                Text(
+                    usingFallbackSelection
+                        ? "Target: \(target.url.lastPathComponent) (tap a clip to choose another)"
+                        : "Target: \(target.url.lastPathComponent)"
+                )
+                .font(.system(.caption2, design: .default))
+                .foregroundColor(.secondary.opacity(0.85))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            }
+        }
+    }
+
+    private var transcribeTooltip: String {
+        if mediaFileCount == 0 {
+            return "Import media with ⌘I before transcribing."
+        }
+        if let target = transcribeTargetMedia {
+            return "Generate a word-level transcript for \(target.url.lastPathComponent)."
+        }
+        return "Unable to resolve a clip to transcribe."
+    }
+
+    private var cancelButton: some View {
+        Button(action: { transcriptVM.cancelTranscription() }) {
+            HStack(spacing: 4) {
+                ProgressView()
+                    .scaleEffect(0.6)
+                    .frame(width: 14, height: 14)
+                Text("\(Int(transcriptVM.transcriptionProgress * 100))%")
+                    .font(.system(.caption, design: .monospaced))
+                Image(systemName: "xmark")
+                    .font(.system(size: 9, weight: .bold))
+            }
+        }
+        .buttonStyle(.bordered)
+        .tint(.orange)
+        .help("Cancel transcription")
+    }
+
+    private var divider: some View {
+        Divider()
+            .frame(height: 20)
+    }
+
+    // MARK: - Status Labels
+
+    private var statusLabels: some View {
+        HStack(spacing: 8) {
             if transcriptVM.hasTranscript {
                 HStack(spacing: 6) {
                     Text("\(transcriptVM.activeWords.count) words")
@@ -77,15 +211,80 @@ struct TranscriptToolbarView: View {
                 }
             }
 
-            // Selection count
             if !transcriptVM.selectedWordIds.isEmpty {
                 Text("\(transcriptVM.selectedWordIds.count) selected")
                     .font(.system(.caption2, design: .monospaced))
                     .foregroundColor(Color(red: 0.486, green: 0.424, blue: 0.980))
             }
+
+            if transcriptVM.hasTranscript {
+                engineBadge
+            }
+        }
+    }
+
+    private var engineBadge: some View {
+        HStack(spacing: 3) {
+            Image(systemName: badgeIcon)
+                .font(.system(size: 8))
+            Text(badgeLabel)
+                .font(.system(.caption2, design: .monospaced))
+        }
+        .foregroundColor(.secondary.opacity(0.6))
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+        .help("Transcript was generated with \(transcriptVM.selectedBackend.displayName)")
+    }
+
+    private var badgeIcon: String {
+        switch transcriptVM.selectedBackend {
+        case .whisperKit:  return "cpu"
+        case .appleSpeech: return "apple.logo"
+        case .mlxWhisper:  return "bolt.fill"
+        }
+    }
+
+    private var badgeLabel: String {
+        switch transcriptVM.selectedBackend {
+        case .whisperKit:  return "WK·\(transcriptVM.whisperKitModelSize.shortLabel)"
+        case .appleSpeech: return "Apple"
+        case .mlxWhisper:  return "MLX"
+        }
+    }
+
+    // MARK: - Error Banner
+
+    private func errorBanner(message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundColor(.yellow)
+
+            Text(message)
+                .font(.caption)
+                .foregroundColor(Color(white: 0.9))
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer()
+
+            Button(action: { transcriptVM.clearTranscriptionError() }) {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(Color(red: 0.141, green: 0.141, blue: 0.141))
+        .background(Color(red: 0.35, green: 0.22, blue: 0.07))
+        .overlay(
+            Rectangle()
+                .frame(height: 1)
+                .foregroundColor(Color.yellow.opacity(0.3)),
+            alignment: .top
+        )
     }
 }

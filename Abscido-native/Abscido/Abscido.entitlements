@@ -8,5 +8,8 @@
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- Required for SFSpeechRecognizer (both on-device and server-side recognition) -->
+    <key>com.apple.security.personal-information.speech-recognition</key>
+    <true/>
 </dict>
 </plist>

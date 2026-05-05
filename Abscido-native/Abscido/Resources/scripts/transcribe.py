@@ -15,6 +15,12 @@ Arguments:
 
 Environment:
     ABSCIDO_CACHE_DIR - Directory for model cache (default: ~/.cache/abscido/models)
+    ABSCIDO_FFMPEG   - Optional absolute path to the ffmpeg executable (prepended to PATH).
+
+Requires:
+    ffmpeg on PATH (mlx_whisper shells out during decode). The Abscido app injects PATH + this
+    variable for Homebrew kegs (`bin` + `opt/ffmpeg/bin`). Set ABSCIDO_FFMPEG manually if ffmpeg
+    lives elsewhere (e.g. `export ABSCIDO_FFMPEG="$HOME/ffmpeg-build/bin/ffmpeg"` before launch).
 
 Output:
     stdout: Single JSON line with Whisper result (text, segments, words)
@@ -27,8 +33,35 @@ Exit codes:
 
 import json
 import os
+import shutil
 import sys
 import time
+import wave
+
+import numpy as np
+
+def load_wav_mono_16k(path: str) -> np.ndarray:
+    """
+    Load a 16 kHz mono PCM16 WAV into float32 in [-1, 1].
+    We intentionally avoid ffmpeg by decoding the WAV ourselves.
+    """
+    with wave.open(path, "rb") as wf:
+        channels = wf.getnchannels()
+        rate = wf.getframerate()
+        sampwidth = wf.getsampwidth()
+        frames = wf.getnframes()
+
+        if channels != 1:
+            raise ValueError(f"WAV must be mono; got {channels} channels")
+        if rate != 16000:
+            raise ValueError(f"WAV must be 16000 Hz; got {rate} Hz")
+        if sampwidth != 2:
+            raise ValueError(f"WAV must be PCM16 (2 bytes); got sample width {sampwidth}")
+
+        pcm = wf.readframes(frames)
+        audio_i16 = np.frombuffer(pcm, dtype=np.int16)
+        audio = audio_i16.astype(np.float32) / 32768.0
+        return audio
 
 
 def write_progress(progress: float) -> None:
@@ -99,8 +132,11 @@ def main():
     try:
         write_progress(0.15)
 
+        audio = load_wav_mono_16k(wav_path)
+
+        # Pass audio array directly to avoid mlx_whisper's ffmpeg-based loader.
         result = mlx_whisper.transcribe(
-            wav_path,
+            audio,
             path_or_hf_repo=model_path,
             word_timestamps=True,
             language=language,

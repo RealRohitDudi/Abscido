@@ -38,6 +38,8 @@ struct WorkspaceView: View {
                         transcriptVM: transcriptVM,
                         aiVM: aiVM,
                         selectedMediaFile: selectedMediaFile,
+                        transcribeTargetMedia: transcribeTargetMedia,
+                        mediaFileCount: projectVM.mediaFiles.count,
                         onTranscribe: handleTranscribe
                     )
                 }
@@ -67,7 +69,7 @@ struct WorkspaceView: View {
                 BadTakeReviewView(
                     aiVM: aiVM,
                     transcriptVM: transcriptVM,
-                    selectedMediaFile: selectedMediaFile,
+                    selectedMediaFile: transcriptSourceMedia,
                     onEditDecisionChanged: handleEditDecisionChanged
                 )
                 .frame(width: 320)
@@ -123,6 +125,22 @@ struct WorkspaceView: View {
         return projectVM.mediaFile(forId: id)
     }
 
+    /// Clip transcription runs against a concrete source file. Prefer the bin selection; if none
+    /// (or stale id), fall back to the first imported clip so Transcribe is never inexplicably off.
+    private var transcribeTargetMedia: MediaFile? {
+        if let sel = selectedMediaFile { return sel }
+        return projectVM.mediaFiles.first
+    }
+
+    /// Clip that owns the current transcript words — used for ripple delete / AI acceptance.
+    /// Falls back to `transcribeTargetMedia` when the transcript panel is empty.
+    private var transcriptSourceMedia: MediaFile? {
+        if let cid = transcriptVM.words.first?.clipId, let file = projectVM.mediaFile(forId: cid) {
+            return file
+        }
+        return transcribeTargetMedia
+    }
+
     // MARK: - Actions
 
     /// Bin selection drives **source** preview + transcript only. Timeline edits stay in OTIO until
@@ -146,12 +164,20 @@ struct WorkspaceView: View {
     }
 
     private func handleTranscribe() {
-        guard let file = selectedMediaFile else { return }
+        guard let file = transcribeTargetMedia else { return }
+
+        // Keep bin selection aligned with what we transcribe so player + transcript stay in sync.
+        if selectedMediaFileId != file.id {
+            selectedMediaFileId = file.id
+            loadMediaFile(file)
+        }
+
+        transcriptVM.loadTranscript(clipId: file.id)
         transcriptVM.transcribe(mediaFile: file)
     }
 
     private func handleDeleteWords() {
-        guard let file = selectedMediaFile else { return }
+        guard let file = transcriptSourceMedia else { return }
         if let editDecision = transcriptVM.deleteSelectedWords(mediaFile: file) {
             rebuildComposition(editDecision: editDecision)
         }

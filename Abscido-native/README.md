@@ -9,9 +9,8 @@ The main inspiration is Davinci Resolve.
 
 - **macOS 14 Sonoma** or later (macOS 15 Sequoia recommended)
 - **Xcode 16** with Swift 5.10
-- **Apple Silicon** Mac (M1 or later) — required for MLX-Whisper transcription
-- **Python 3.12** (arm64) — for MLX-Whisper local transcription
 - **OpenTimelineIO** Open Source API and interchange format for editorial timeline information.
+- *(Optional)* **Apple Silicon** Mac + **Python 3.12** with `mlx-whisper` — only for the MLX-Whisper quality upgrade
 
 ## Quick Start
 
@@ -22,39 +21,59 @@ cd Abscido-native
 open Package.swift
 ```
 
-Xcode will resolve SPM dependencies automatically (SQLite.swift).
+Xcode will resolve SPM dependencies automatically (SQLite.swift, OpenTimelineIO).
 
-### 2. Set Up Python Environment (for transcription)
+### 2. Transcription — Works Out of the Box
 
-MLX-Whisper runs locally on Apple Silicon. Set up a Python environment:
+Abscido uses **Apple's built-in Speech Recognition** (`SFSpeechRecognizer`) as its primary transcription engine.
+
+- **Zero setup required** — no Python, no model download, no internet required
+- Runs fully **offline** on macOS 13+
+- Supports **20+ languages** with word-level timestamps
+- **Sandbox-safe** — works in all App Store builds
+
+On first transcription, macOS will ask for Speech Recognition permission. Grant it in the system dialog.
+
+If the app quits with `__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__` in the crash log:
+
+1. This project embeds **`NSSpeechRecognitionUsageDescription`** into the binary via linker `-sectcreate __TEXT __info_plist` (`Package.swift`). Run `swift build` after pulling so the Mach-O is relinked.
+2. **`swift run` does not attach Speech’s entitlement** to the ad-hoc signature (`codesign -d --entitlements`). On recent macOS, TCC validates **`com.apple.security.personal-information.speech-recognition`** in the *signed* entitlement blob; without it, Speech can still abort despite the embedded plist. From the command line, build, re-sign, and launch:
+
+```bash
+cd Abscido-native
+./scripts/run-with-speech-capability.sh
+```
+
+That uses **`Abscido/LocalSigning.entitlements`** (Speech + `get-task-allow`, intentionally **no app sandbox** so SPM dev builds keep normal filesystem access). Xcode runs use **`Abscido.entitlements`** (sandboxed) and get the same Speech capability from the project’s signing settings.
+
+#### Optional: MLX-Whisper (Higher Accuracy on Apple Silicon)
+
+For higher transcription accuracy, switch to the **MLX-Whisper** engine in the engine picker:
 
 ```bash
 # Create a dedicated Python virtual environment
 python3 -m venv ~/.abscido-python
 source ~/.abscido-python/bin/activate
 
-# Install MLX-Whisper
+# Install MLX-Whisper and ffmpeg (required shell dependency for audio decode)
+brew install ffmpeg
 pip install mlx-whisper
-
-# Verify installation
-python3 -c "import mlx_whisper; print('MLX-Whisper ready')"
 ```
 
-For development, the app falls back to system Python (`/opt/homebrew/bin/python3`).
-For distribution, bundle the Python runtime in `Resources/python/`.
+The Whisper model (`mlx-community/whisper-large-v3-mlx`, ~1.5 GB) downloads automatically on first use.
+Cache location: `~/Library/Caches/Abscido/models/`
 
-### 3. Model Download
+If ffmpeg is installed but MLX still fails, point Abscido at the binary explicitly:  
+`export ABSCIDO_FFMPEG="/full/path/to/ffmpeg"` then launch from the same Terminal session (or add it under **Scheme → Run → Arguments → Environment Variables** in Xcode).
 
-The Whisper model downloads automatically on first transcription:
-- **Model**: `mlx-community/whisper-large-v3-mlx` (~1.5GB)
-- **Cache location**: `~/Library/Caches/Abscido/models/`
+> **Note**: App Sandbox (**⌘R** from Xcode using `Abscido.entitlements`) can block subprocesses from executing **`/opt/homebrew/bin/ffmpeg`**. MLX-Whisper works most reliably when you run **`./scripts/run-with-speech-capability.sh`** / a **non-sandboxed** local build alongside **`brew install ffmpeg`**.
 
-### 4. Anthropic API Key (for AI Bad Take Detection)
+### 3. Anthropic API Key (for AI Bad Take Detection)
 
 On first launch, go to **Settings** and enter your Anthropic API key.
 The key is stored securely in the macOS Keychain — never in UserDefaults or on disk.
 
-### 5. Build & Run
+### 4. Build & Run
 
 1. Open `Package.swift` in Xcode
 2. Select the `Abscido` scheme
@@ -99,16 +118,16 @@ Abscido/
 
 ### Tech Stack
 
-| Component        | Technology                              |
-|------------------|-----------------------------------------|
-| UI Framework     | SwiftUI (macOS lifecycle)               |
-| Media Engine     | AVFoundation (AVPlayer, AVComposition)  |
-| Transcription    | MLX-Whisper (local, Apple Silicon)      |
-| Timeline Model   | OTIO-compatible native Swift types      |
-| Database         | SQLite.swift                            |
-| AI               | Anthropic Claude API (URLSession)       |
-| XML Export       | Foundation XMLDocument (pure Swift)     |
-| Secrets          | macOS Keychain (Security framework)     |
+| Component        | Technology                                          |
+|------------------|-----------------------------------------------------|
+| UI Framework     | SwiftUI (macOS lifecycle)                           |
+| Media Engine     | AVFoundation (AVPlayer, AVComposition)              |
+| Transcription    | SFSpeechRecognizer (primary) + MLX-Whisper (opt.)  |
+| Timeline Model   | OTIO-compatible native Swift types                  |
+| Database         | SQLite.swift                                        |
+| AI               | Anthropic Claude API (URLSession)                   |
+| XML Export       | Foundation XMLDocument (pure Swift)                 |
+| Secrets          | macOS Keychain (Security framework)                 |
 
 ### Key Design Decisions
 

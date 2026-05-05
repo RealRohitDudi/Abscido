@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>Abscido</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.abscido.mac</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Abscido</string>
+	<key>CFBundlePackageType</key>
+	<string>????</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+
+	<!--
+	  Required — without this macOS terminates the process (__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__)
+	  the first time SFSpeechRecognizer requests access (e.g. `swift run` bare executable).
+	-->
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Abscido transcribes the audio track of clips you import so you can edit by deleting words.</string>
+
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Microphone access is optional; transcription uses imported files. This key satisfies system checks for speech-related features.</string>
+</dict>
+</plist>

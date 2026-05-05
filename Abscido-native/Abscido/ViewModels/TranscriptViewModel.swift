@@ -1,5 +1,24 @@
-import Foundation
 import Combine
+import Dispatch
+import Foundation
+import Security
+import Speech
+
+/// Weak bridge — progress hops to main without capturing `Task.detached`'s `self`. Throttled to avoid flooding the event loop.
+private final class TranscriptionProgressRelay: @unchecked Sendable {
+    weak var viewModel: TranscriptViewModel?
+    private var lastEmit: CFAbsoluteTime = 0
+
+    func report(_ value: Double) {
+        let now = CFAbsoluteTimeGetCurrent()
+        let isBoundary = value <= 0.02 || value >= 0.99
+        guard isBoundary || now - lastEmit >= 0.08 else { return }
+        lastEmit = now
+        DispatchQueue.main.async { [weak viewModel] in
+            viewModel?.transcriptionProgress = value
+        }
+    }
+}
 
 /// Manages transcript word states, selection, undo/redo, and the delete→ripple flow.
 @MainActor
@@ -11,7 +30,10 @@ final class TranscriptViewModel {
     var currentPlayingWordId: Int64?
     var isTranscribing = false
     var transcriptionProgress: Double = 0
+    var transcriptionError: String?
     var selectedLanguage: String = "en"
+    var selectedBackend: TranscriptionBackend = .whisperKit
+    var whisperKitModelSize: WhisperKitModelSize = .base
 
     private var undoStack: [[TranscriptWord]] = []
     private var redoStack: [[TranscriptWord]] = []
@@ -19,6 +41,7 @@ final class TranscriptViewModel {
 
     private let transcriptRepo = TranscriptRepository()
     private let transcriptionEngine = TranscriptionEngine()
+    private var transcriptionTask: Task<Void, Never>?
 
     // MARK: - Computed
 
@@ -52,41 +75,151 @@ final class TranscriptViewModel {
     // MARK: - Transcription
 
     func transcribe(mediaFile: MediaFile) {
+        transcriptionTask?.cancel()
+
         isTranscribing = true
         transcriptionProgress = 0
+        transcriptionError = nil
 
-        Task {
+        let language = selectedLanguage
+        let backend  = selectedBackend
+        let modelName: String? = backend == .whisperKit ? whisperKitModelSize.rawValue
+                               : backend == .mlxWhisper  ? MLXWhisperBridge.defaultModelName
+                               : nil
+        let engine  = transcriptionEngine
+        let clipId  = mediaFile.id
+
+        let progressRelay = TranscriptionProgressRelay()
+        progressRelay.viewModel = self
+
+        // Inherit MainActor so Speech / TCC calls happen on the app's principal thread.
+        transcriptionTask = Task { @MainActor [weak self, engine, progressRelay] in
+            guard let self else { return }
+
+            // Apple Speech pre-flight: check for the required TCC entitlement BEFORE calling any
+            // Speech API. On unsigned `swift run` builds the entitlement is absent and macOS will
+            // deliberately crash the process (__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__) the moment
+            // SFSpeechRecognizer tries to contact the TCC daemon. Detecting this here lets us show
+            // a helpful error instead of a hard crash.
+            if backend == .appleSpeech {
+                guard Self.hasSpeechRecognitionEntitlement() else {
+                    transcriptionError = """
+                        Apple Speech requires a re-signed binary. \
+                        Run the app with:  ./scripts/run-with-speech-capability.sh
+                        Or switch the engine to WhisperKit (recommended — no signing needed).
+                        """
+                    isTranscribing = false
+                    return
+                }
+                do {
+                    try await prepareAppleSpeechAuthorization()
+                } catch {
+                    transcriptionError = Self.coherentTranscriptionError(error)
+                    isTranscribing = false
+                    transcriptionProgress = 0
+                    return
+                }
+            }
+
             do {
-                // Clear existing transcript
-                try transcriptRepo.deleteWords(clipId: mediaFile.id)
-                try transcriptRepo.deleteSegments(clipId: mediaFile.id)
+                try transcriptRepo.deleteWords(clipId: clipId)
+                try transcriptRepo.deleteSegments(clipId: clipId)
 
-                let newWords = try await transcriptionEngine.transcribe(
+                let newWords = try await engine.transcribe(
                     mediaFile: mediaFile,
-                    language: selectedLanguage,
-                    onProgress: { [weak self] progress in
-                        Task { @MainActor in
-                            self?.transcriptionProgress = progress
-                        }
-                    }
+                    language: language,
+                    backend: backend,
+                    modelName: modelName,
+                    onProgress: { progressRelay.report($0) }
                 )
 
-                // Assign IDs by persisting
+                try Task.checkCancellation()
+
                 try transcriptRepo.insertWords(newWords)
-                words = try transcriptRepo.fetchWords(clipId: mediaFile.id)
-
-                // Build segments from words
-                let newSegments = buildSegments(from: words, clipId: mediaFile.id)
+                words = try transcriptRepo.fetchWords(clipId: clipId)
+                let newSegments = buildSegments(from: words, clipId: clipId)
                 try transcriptRepo.insertSegments(newSegments)
-                segments = try transcriptRepo.fetchSegments(clipId: mediaFile.id)
-
+                segments = try transcriptRepo.fetchSegments(clipId: clipId)
                 isTranscribing = false
                 transcriptionProgress = 1.0
+
+            } catch is CancellationError {
+                isTranscribing = false
+                transcriptionProgress = 0
+
             } catch {
+                transcriptionError = Self.coherentTranscriptionError(error)
                 isTranscribing = false
                 transcriptionProgress = 0
             }
         }
+    }
+
+    // MARK: - Apple Speech helpers
+
+    /// Returns `true` when the binary's codesign contains the speech-recognition entitlement.
+    /// A `false` result means `swift run` was used without the re-signing script; attempting to
+    /// call `SFSpeechRecognizer.requestAuthorization` would crash the process via TCC.
+    private static func hasSpeechRecognitionEntitlement() -> Bool {
+        guard let task = SecTaskCreateFromSelf(nil) else { return false }
+        let key = "com.apple.security.personal-information.speech-recognition" as CFString
+        let value = SecTaskCopyValueForEntitlement(task, key, nil)
+        return value != nil
+    }
+
+    /// Presents macOS Speech permission on the main actor before Speech touches media files.
+    private func prepareAppleSpeechAuthorization() async throws {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        switch status {
+        case .authorized:
+            return
+        case .denied:
+            throw AbscidoError.transcriptionFailed(
+                clipId: 0,
+                pythonError: "Speech recognition is off. Enable Abscido in System Settings → Privacy & Security → Speech Recognition."
+            )
+        case .restricted:
+            throw AbscidoError.transcriptionFailed(
+                clipId: 0,
+                pythonError: "Speech recognition is restricted on this Mac (Screen Time or device policy)."
+            )
+        case .notDetermined:
+            let newStatus = await withCheckedContinuation { (cont: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
+                SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
+            }
+            guard newStatus == .authorized else {
+                throw AbscidoError.transcriptionFailed(
+                    clipId: 0,
+                    pythonError: "Speech recognition was not allowed. Enable it in System Settings → Privacy & Security → Speech Recognition."
+                )
+            }
+        @unknown default:
+            throw AbscidoError.transcriptionFailed(clipId: 0, pythonError: "Unknown speech authorization state.")
+        }
+    }
+
+    /// Produces clearer copy than opaque NSError descriptions for Speech / export failures.
+    private static func coherentTranscriptionError(_ error: Error) -> String {
+        if let abscido = error as? AbscidoError {
+            return abscido.errorDescription ?? String(describing: abscido)
+        }
+        let ns = error as NSError
+        let description = ns.localizedDescription.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !description.isEmpty else {
+            return "Transcription failed (domain \(ns.domain), code \(ns.code))."
+        }
+        return description
+    }
+
+    func cancelTranscription() {
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        isTranscribing = false
+        transcriptionProgress = 0
+    }
+
+    func clearTranscriptionError() {
+        transcriptionError = nil
     }
 
     // MARK: - Selection
@@ -122,11 +255,9 @@ final class TranscriptViewModel {
     // MARK: - Delete Flow (core product loop)
 
     /// Deletes selected words, triggers ripple edit computation.
-    /// Returns the new EditDecision for the affected clip.
     func deleteSelectedWords(mediaFile: MediaFile) -> EditDecision? {
         guard !selectedWordIds.isEmpty else { return nil }
 
-        // Save undo state
         pushUndo()
 
         let command = DeleteWordsCommand(
@@ -135,13 +266,9 @@ final class TranscriptViewModel {
         )
         _ = command.execute(on: &words)
 
-        // Persist deletion states
         persistWordStates()
-
-        // Clear selection
         selectedWordIds = []
 
-        // Compute new edit decision
         return RippleEditStrategy.computeEditDecision(
             words: words,
             clipId: mediaFile.id,
@@ -150,7 +277,6 @@ final class TranscriptViewModel {
         )
     }
 
-    /// Restores words from a previous state.
     func restoreWords(_ previousWords: [TranscriptWord]) {
         words = previousWords
         persistWordStates()
@@ -189,8 +315,8 @@ final class TranscriptViewModel {
 
     // MARK: - Playback Sync
 
-    /// Updates the currently playing word based on playback time.
-    /// Uses binary search for O(log n) performance.
+    /// Updates the currently highlighted word based on playback position.
+    /// Binary search for O(log n) performance at 60 fps.
     func updatePlayingWord(timeMs: Double) {
         let sortedWords = words.filter { !$0.isDeleted }.sorted { $0.startMs < $1.startMs }
         guard !sortedWords.isEmpty else {
@@ -198,15 +324,12 @@ final class TranscriptViewModel {
             return
         }
 
-        // Binary search for the word containing timeMs
-        var low = 0
-        var high = sortedWords.count - 1
+        var low = 0, high = sortedWords.count - 1
         var result: Int?
 
         while low <= high {
             let mid = (low + high) / 2
             let word = sortedWords[mid]
-
             if timeMs >= word.startMs && timeMs < word.endMs {
                 result = mid
                 break
@@ -217,11 +340,7 @@ final class TranscriptViewModel {
             }
         }
 
-        if let idx = result {
-            currentPlayingWordId = sortedWords[idx].id
-        } else {
-            currentPlayingWordId = nil
-        }
+        currentPlayingWordId = result.map { sortedWords[$0].id }
     }
 
     // MARK: - Edit Decision Computation
@@ -259,7 +378,6 @@ final class TranscriptViewModel {
 
         for word in words {
             if let last = currentWords.last, word.startMs - last.endMs > maxSegmentGapMs {
-                // Close current segment
                 let text = currentWords.map(\.word).joined(separator: " ")
                 segments.append(TranscriptSegment(
                     clipId: clipId,
