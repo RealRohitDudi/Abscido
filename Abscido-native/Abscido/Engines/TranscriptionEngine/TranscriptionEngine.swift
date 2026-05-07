@@ -49,6 +49,8 @@ actor TranscriptionEngine {
         modelName: String? = nil,
         onProgress: @escaping @Sendable (Double) -> Void
     ) async throws -> [TranscriptWord] {
+        // Normalize to 2-letter Whisper/MLX codes (e.g. "hi-IN" -> "hi").
+        let normalizedLanguage = LanguageRegistry.normalizedLanguageCode(language) ?? "en"
         switch backend {
 
         case .whisperKit:
@@ -57,7 +59,7 @@ actor TranscriptionEngine {
                 try await WhisperKitTranscriber.transcribe(
                     mediaURL: scopedURL,
                     clipId: mediaFile.id,
-                    language: language,
+                    language: normalizedLanguage,
                     modelSize: size,
                     onProgress: onProgress
                 )
@@ -68,7 +70,7 @@ actor TranscriptionEngine {
                 try await AppleSpeechTranscriber.transcribe(
                     mediaURL: scopedURL,
                     clipId: mediaFile.id,
-                    languageCode: language,
+                    languageCode: normalizedLanguage,
                     onProgress: onProgress
                 )
             }
@@ -78,7 +80,7 @@ actor TranscriptionEngine {
                 try await runMLXWhisper(
                     mediaURL: scopedURL,
                     clipId: mediaFile.id,
-                    language: language,
+                    language: normalizedLanguage,
                     mlxModelName: modelName ?? MLXWhisperBridge.defaultModelName,
                     onProgress: onProgress
                 )

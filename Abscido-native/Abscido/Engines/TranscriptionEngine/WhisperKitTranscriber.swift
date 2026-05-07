@@ -93,8 +93,8 @@ enum WhisperKitTranscriber {
 
         // MARK: Decode options
         // Force the selected language when provided; otherwise allow auto-detection.
-        let normalizedLanguage = (language == "auto" || language.isEmpty) ? nil : language
-        let options = DecodingOptions(
+        let normalizedLanguage = LanguageRegistry.normalizedLanguageCode(language)
+        var options = DecodingOptions(
             verbose: false,
             task: .transcribe,
             language: normalizedLanguage,
@@ -105,6 +105,16 @@ enum WhisperKitTranscriber {
             withoutTimestamps: false,
             wordTimestamps: true
         )
+
+        // If the user explicitly picked a language, softly bias the decoder toward that script.
+        // This prevents “transcribe but translated to English” failure modes in some clips.
+        if let code = normalizedLanguage,
+           code != "en",
+           let seed = LanguageRegistry.promptSeedText(forNormalizedCode: code),
+           let tokenizer = whisperKit.tokenizer
+        {
+            options.promptTokens = tokenizer.encode(text: seed)
+        }
 
         // MARK: Run transcription
         let results: [TranscriptionResult]
