@@ -85,23 +85,48 @@ enum LanguageRegistry {
         return normalized
     }
 
-    /// Minimal in-language seed text to bias decoding toward the chosen script.
-    /// This helps prevent Whisper-like models from emitting English translations when
-    /// the user explicitly chose a source language.
+    /// Multi-sentence in-language seed text that primes the Whisper decoder's prior toward the
+    /// chosen script. The `<|hi|>` language token alone is only a *soft* bias — for languages
+    /// where two scripts share an audio space (Hindi/Urdu, traditional/simplified Chinese, etc.)
+    /// a one-word seed is not enough to keep small Whisper models on the right script. A longer
+    /// natural-language prefix fed via `promptTokens` shifts the decoder's distribution decisively
+    /// toward the target script for every subsequent window.
     static func promptSeedText(forNormalizedCode code: String) -> String? {
         switch code {
         case "hi":
-            return "हिंदी"
+            // Devanagari prior. Without this Whisper-base routinely emits Urdu/Arabic-script
+            // tokens for Hindi audio because Hindi-Urdu share phonemes in the model's audio space.
+            return "नमस्ते। यह वीडियो हिंदी भाषा में है। मैं हिंदी में बात कर रहा हूँ। कृपया देवनागरी लिपि में लिखें।"
+        case "ur":
+            return "السلام علیکم۔ یہ ویڈیو اردو زبان میں ہے۔ میں اردو میں بات کر رہا ہوں۔"
+        case "bn":
+            return "নমস্কার। এই ভিডিওটি বাংলা ভাষায়। আমি বাংলায় কথা বলছি।"
+        case "mr":
+            return "नमस्कार. हा व्हिडिओ मराठी भाषेत आहे. मी मराठीत बोलत आहे."
+        case "ta":
+            return "வணக்கம். இந்த வீடியோ தமிழ் மொழியில் உள்ளது. நான் தமிழில் பேசுகிறேன்."
+        case "te":
+            return "నమస్కారం. ఈ వీడియో తెలుగు భాషలో ఉంది. నేను తెలుగులో మాట్లాడుతున్నాను."
         case "ja":
-            return "日本語"
+            return "こんにちは。このビデオは日本語です。私は日本語で話しています。日本語で書き起こしてください。"
         case "zh":
-            return "中文"
+            return "你好。这段视频是普通话。我正在用中文说话。请用简体中文转写。"
         case "ko":
-            return "한국어"
+            return "안녕하세요. 이 영상은 한국어입니다. 저는 한국어로 말하고 있습니다."
         case "ru":
-            return "русский"
+            return "Здравствуйте. Это видео на русском языке. Я говорю по-русски. Пожалуйста, расшифруйте кириллицей."
         case "ar":
-            return "العربية"
+            return "مرحبا. هذا الفيديو باللغة العربية. أنا أتحدث بالعربية. الرجاء الكتابة بالحروف العربية."
+        case "fa":
+            return "سلام. این ویدیو به زبان فارسی است. من به فارسی صحبت می‌کنم."
+        case "he":
+            return "שלום. הסרטון הזה בעברית. אני מדבר בעברית. אנא תמללו באותיות עבריות."
+        case "th":
+            return "สวัสดีครับ วิดีโอนี้เป็นภาษาไทย ผมกำลังพูดภาษาไทย"
+        case "el":
+            return "Γειά σας. Αυτό το βίντεο είναι στα ελληνικά. Μιλώ ελληνικά."
+        case "uk":
+            return "Привіт. Це відео українською мовою. Я розмовляю українською."
         default:
             return nil
         }

@@ -6,26 +6,60 @@ import WhisperKit
 
 /// Available on-device Whisper model sizes. All are CoreML-compiled and run locally via
 /// Apple's Neural Engine + GPU — no network after the one-time download, no TCC entitlements.
+///
+/// **Choosing a model for non-English audio:** Whisper's `tiny` and `base` checkpoints are
+/// trained almost entirely on English. With languages like Hindi, Arabic, Chinese or Japanese
+/// they routinely emit the *wrong* script (e.g. Urdu/Arabic glyphs for Hindi audio) even when
+/// the language token is forced. `small` is the practical minimum for non-English; for
+/// production-grade quality use `largeV3Turbo`.
 enum WhisperKitModelSize: String, CaseIterable, Sendable {
-    case tiny  = "openai_whisper-tiny"
-    case base  = "openai_whisper-base"
-    case small = "openai_whisper-small"
+    case tiny         = "openai_whisper-tiny"
+    case base         = "openai_whisper-base"
+    case small        = "openai_whisper-small"
+    /// ANE-optimised compressed Whisper large-v3 (Sept 2024 release). Recommended for any
+    /// non-English language and the highest-quality option that still fits in a one-time
+    /// download under a gigabyte.
+    case largeV3Turbo = "openai_whisper-large-v3-v20240930_turbo_632MB"
 
     var displayName: String {
         switch self {
-        case .tiny:  return "Tiny  (75 MB · fastest)"
-        case .base:  return "Base (150 MB · balanced)"
-        case .small: return "Small (480 MB · accurate)"
+        case .tiny:         return "Tiny  (75 MB · English only)"
+        case .base:         return "Base (150 MB · English only)"
+        case .small:        return "Small (480 MB · multilingual)"
+        case .largeV3Turbo: return "Large v3 Turbo (632 MB · best quality)"
         }
     }
 
     /// Model size string shown beside the picker.
     var shortLabel: String {
         switch self {
-        case .tiny:  return "Tiny"
-        case .base:  return "Base"
-        case .small: return "Small"
+        case .tiny:         return "Tiny"
+        case .base:         return "Base"
+        case .small:        return "Small"
+        case .largeV3Turbo: return "Large·v3·Turbo"
         }
+    }
+
+    /// Whether this checkpoint is large enough to be reliable for non-English audio.
+    /// Hindi/Urdu, Arabic, CJK, Cyrillic and similar non-Latin languages need at least
+    /// `small` to consistently produce the correct script.
+    var isReliableForNonEnglish: Bool {
+        switch self {
+        case .tiny, .base:      return false
+        case .small, .largeV3Turbo: return true
+        }
+    }
+
+    /// Checkpoint WhisperKit will actually load. `tiny` / `base` cannot reliably honour a forced
+    /// non-English language (they still drift into Urdu/Arabic script for Hindi, etc.); upgrading
+    /// to `small` is the smallest model that multilingual Whisper was trained for.
+    static func effectiveForTranscription(
+        requested: WhisperKitModelSize,
+        normalizedLanguageCode: String
+    ) -> WhisperKitModelSize {
+        guard normalizedLanguageCode != "en" else { return requested }
+        guard !requested.isReliableForNonEnglish else { return requested }
+        return .small
     }
 }
 
@@ -67,6 +101,18 @@ enum WhisperKitTranscriber {
         onProgress(0.06)
 
         // MARK: Initialise WhisperKit (downloads model on first use, loads from cache thereafter)
+        // WhisperKit does not report download progress; first-time Small/Large fetches can take
+        // several minutes. Creep 6%→11% on a timer so the UI is not frozen at 2%.
+        let loadHeartbeat = Task { @Sendable in
+            var p = 0.06
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 450_000_000)
+                guard !Task.isCancelled else { break }
+                p = min(0.11, p + 0.006)
+                onProgress(p)
+            }
+        }
+
         let whisperKit: WhisperKit
         do {
             whisperKit = try await WhisperKit(
@@ -78,11 +124,13 @@ enum WhisperKitTranscriber {
                 download: true
             )
         } catch {
+            loadHeartbeat.cancel()
             throw AbscidoError.transcriptionFailed(
                 clipId: clipId,
                 pythonError: "WhisperKit failed to load model '\(modelSize.shortLabel)': \(error.localizedDescription). Check your internet connection for first-time model download."
             )
         }
+        loadHeartbeat.cancel()
 
         onProgress(0.12)
 
@@ -94,20 +142,43 @@ enum WhisperKitTranscriber {
         // MARK: Decode options
         // Force the selected language when provided; otherwise allow auto-detection.
         let normalizedLanguage = LanguageRegistry.normalizedLanguageCode(language)
+        let isForcedLanguage = normalizedLanguage != nil
+        let isForcedNonEnglish = isForcedLanguage && normalizedLanguage != "en"
+
         var options = DecodingOptions(
             verbose: false,
             task: .transcribe,
             language: normalizedLanguage,
+            // Allow temperature to climb on fallback so a hallucinated low-confidence window
+            // (e.g. wrong-script garbage for Hindi) gets retried instead of frozen at temp 0.
             temperature: 0.0,
+            temperatureFallbackCount: 5,
             usePrefillPrompt: true,
-            detectLanguage: normalizedLanguage == nil,
+            // When we attach `promptTokens` for script priming WhisperKit already bypasses the
+            // KV prefill cache (see TextDecoder.prefillDecoderInputs — the cache branch checks
+            // `promptTokens == nil`). Disable it explicitly for forced non-English so the intent
+            // is obvious in code and we never silently fall back to a cached English-prefilled
+            // KV state on a future WhisperKit version.
+            usePrefillCache: !isForcedNonEnglish,
+            detectLanguage: !isForcedLanguage,
             skipSpecialTokens: true,
             withoutTimestamps: false,
-            wordTimestamps: true
+            wordTimestamps: true,
+            // Suppress the empty / blank-padding tokens; helps prevent "thank you for watching"
+            // / "..." style hallucinations when the audio is sparse.
+            suppressBlank: true,
+            // Slightly stricter than WhisperKit's defaults — rejects the repetitive-script
+            // hallucination loops the small models fall into on Indic / Arabic audio.
+            compressionRatioThreshold: 2.2,
+            logProbThreshold: -1.0,
+            noSpeechThreshold: 0.6
         )
 
-        // If the user explicitly picked a language, softly bias the decoder toward that script.
-        // This prevents “transcribe but translated to English” failure modes in some clips.
+        // If the user explicitly picked a non-English language, prime the decoder with a real
+        // multi-sentence seed in the target script. The `<|xx|>` language token alone is a SOFT
+        // bias — for languages whose audio overlaps with another script (Hindi/Urdu being the
+        // canonical case) only a script-specific prefill prompt reliably keeps Whisper on the
+        // intended writing system.
         if let code = normalizedLanguage,
            code != "en",
            let seed = LanguageRegistry.promptSeedText(forNormalizedCode: code),

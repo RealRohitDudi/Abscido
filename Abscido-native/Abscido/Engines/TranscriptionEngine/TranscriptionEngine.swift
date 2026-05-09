@@ -54,7 +54,11 @@ actor TranscriptionEngine {
         switch backend {
 
         case .whisperKit:
-            let size = modelName.flatMap { WhisperKitModelSize(rawValue: $0) } ?? .base
+            let requested = modelName.flatMap { WhisperKitModelSize(rawValue: $0) } ?? .base
+            let size = WhisperKitModelSize.effectiveForTranscription(
+                requested: requested,
+                normalizedLanguageCode: normalizedLanguage
+            )
             return try await mediaFile.withReadableFileURL { scopedURL in
                 try await WhisperKitTranscriber.transcribe(
                     mediaURL: scopedURL,

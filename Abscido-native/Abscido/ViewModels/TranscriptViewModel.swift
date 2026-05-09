@@ -12,7 +12,12 @@ private final class TranscriptionProgressRelay: @unchecked Sendable {
     func report(_ value: Double) {
         let now = CFAbsoluteTimeGetCurrent()
         let isBoundary = value <= 0.02 || value >= 0.99
-        guard isBoundary || now - lastEmit >= 0.08 else { return }
+        // Setup steps (WhisperKitTranscriber) often fire 0.02 → 0.06 within the same millisecond.
+        // The generic throttle would drop 0.06, so the UI stays at 2% for the entire model
+        // download / CoreML compile (minutes on first Small run).
+        let setupMilestones: [Double] = [0.06, 0.12, 0.91]
+        let nearSetupMilestone = setupMilestones.contains { abs($0 - value) < 0.001 }
+        guard isBoundary || nearSetupMilestone || now - lastEmit >= 0.08 else { return }
         lastEmit = now
         DispatchQueue.main.async { [weak viewModel] in
             viewModel?.transcriptionProgress = value
@@ -33,7 +38,11 @@ final class TranscriptViewModel {
     var transcriptionError: String?
     var selectedLanguage: String = "en"
     var selectedBackend: TranscriptionBackend = .whisperKit
-    var whisperKitModelSize: WhisperKitModelSize = .base
+    /// Default to `.small` rather than `.base`. `base` is English-only quality and produces
+    /// wrong-script transcripts for Hindi, Arabic, CJK audio (e.g. Hindi audio decoded into
+    /// Urdu/Arabic glyphs) — `.small` is the smallest checkpoint that's reliable across the
+    /// language picker. Users who only need English can downshift to `.base` / `.tiny`.
+    var whisperKitModelSize: WhisperKitModelSize = .small
 
     private var undoStack: [[TranscriptWord]] = []
     private var redoStack: [[TranscriptWord]] = []
