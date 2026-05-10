@@ -48,6 +48,12 @@ final class AppCoordinator {
             self?.rebuildPlayerCompositionFromTimeline()
             self?.persistCurrentTimelineJSON()
         }
+        timelineVM.onSourceRangesChanged = { [weak self] keptRangesByMediaFile, affectedMediaFileIds in
+            self?.transcriptVM.markWordsDeletedByTimeline(
+                keptRangesByClipId: keptRangesByMediaFile,
+                affectedClipIds: affectedMediaFileIds
+            )
+        }
     }
 
     private func rebuildPlayerCompositionFromTimeline() {

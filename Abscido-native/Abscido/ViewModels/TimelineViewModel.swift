@@ -63,6 +63,9 @@ final class TimelineViewModel {
 
     /// Callback to notify parent when timeline changes require composition rebuild.
     var onTimelineChanged: (() -> Void)?
+    /// Callback for transcript sync after destructive timeline edits. The dictionary contains
+    /// currently kept source ranges keyed by media file id; the set limits work to changed media.
+    var onSourceRangesChanged: (([Int64: [TimeRangeMs]], Set<Int64>) -> Void)?
 
     let otioEngine = OTIOEngine()
     private let waveformGenerator = WaveformGenerator()
@@ -71,6 +74,39 @@ final class TimelineViewModel {
 
     var clips: [TimelineClipModel] {
         tracks.flatMap(\.clips)
+    }
+
+    /// Current visible source ranges per media file, independent of timeline/program placement.
+    /// Video/audio linked partners may contribute duplicate ranges; consumers should treat these
+    /// as a union of kept source intervals.
+    func keptSourceRangesByMediaFile() -> [Int64: [TimeRangeMs]] {
+        var rangesByMediaFile: [Int64: [TimeRangeMs]] = [:]
+        for clip in clips where clip.mediaFileId != 0 && clip.color != .gap && clip.sourceDurationMs > 0 {
+            rangesByMediaFile[clip.mediaFileId, default: []].append(
+                TimeRangeMs(
+                    startMs: clip.sourceStartMs,
+                    endMs: clip.sourceStartMs + clip.sourceDurationMs
+                )
+            )
+        }
+        return rangesByMediaFile.mapValues { ranges in
+            ranges.sorted { $0.startMs < $1.startMs }
+        }
+    }
+
+    private func sourceRangeChangedMediaIds(
+        from previous: [Int64: [TimeRangeMs]],
+        to current: [Int64: [TimeRangeMs]]
+    ) -> Set<Int64> {
+        let mediaIds = Set(previous.keys).union(current.keys)
+        return Set(mediaIds.filter { previous[$0, default: []] != current[$0, default: []] })
+    }
+
+    private func notifySourceRangesChanged(from previous: [Int64: [TimeRangeMs]]) {
+        let current = keptSourceRangesByMediaFile()
+        let changedMediaIds = sourceRangeChangedMediaIds(from: previous, to: current)
+        guard !changedMediaIds.isEmpty else { return }
+        onSourceRangesChanged?(current, changedMediaIds)
     }
 
     /// Converts an edit-program time into the source time for a concrete media file.
@@ -240,6 +276,7 @@ final class TimelineViewModel {
         videoTrackIndex: Int,
         audioTrackIndex: Int
     ) {
+        let previousSourceRanges = keptSourceRangesByMediaFile()
         Task {
             if await otioEngine.currentTimeline() == nil {
                 _ = await otioEngine.ensureEmptyTimeline()
@@ -252,6 +289,7 @@ final class TimelineViewModel {
                 audioTrackIndex: audioTrackIndex
             )
             await refreshFromEngine()
+            notifySourceRangesChanged(from: previousSourceRanges)
             await generateWaveforms(for: [file])
             onTimelineChanged?()
         }
@@ -393,9 +431,11 @@ final class TimelineViewModel {
         selectedClipIds.removeAll()
         updateSelectionState()
 
+        let previousSourceRanges = keptSourceRangesByMediaFile()
         Task {
             await otioEngine.applyLiftRippleRemoval(liftClipSlotKeys: liftSlots, rippleRemoveSlotKeys: rippleSlots)
             await refreshFromEngine()
+            notifySourceRangesChanged(from: previousSourceRanges)
             onTimelineChanged?()
         }
     }
@@ -426,17 +466,21 @@ final class TimelineViewModel {
     // MARK: - Trim
 
     func trimClipStart(trackIndex: Int, clipIndex: Int, newStartMs: Double) {
+        let previousSourceRanges = keptSourceRangesByMediaFile()
         Task {
             await otioEngine.trimClipStart(trackIndex: trackIndex, clipIndex: clipIndex, newStartMs: newStartMs)
             await refreshFromEngine()
+            notifySourceRangesChanged(from: previousSourceRanges)
             onTimelineChanged?()
         }
     }
 
     func trimClipEnd(trackIndex: Int, clipIndex: Int, newEndMs: Double) {
+        let previousSourceRanges = keptSourceRangesByMediaFile()
         Task {
             await otioEngine.trimClipEnd(trackIndex: trackIndex, clipIndex: clipIndex, newEndMs: newEndMs)
             await refreshFromEngine()
+            notifySourceRangesChanged(from: previousSourceRanges)
             onTimelineChanged?()
         }
     }
@@ -505,9 +549,11 @@ final class TimelineViewModel {
 
     func rippleTrimStartToPlayhead() {
         let ms = playheadMs
+        let previousSourceRanges = keptSourceRangesByMediaFile()
         Task { @MainActor in
             let clipHeadProgramMs = await otioEngine.rippleTrimStartToPlayhead(playheadMs: ms)
             await refreshFromEngine()
+            notifySourceRangesChanged(from: previousSourceRanges)
             // Park the CTI at the **clip head** (`segmentStart`): that is the timeline position of the first
             // frame left after Q — staying at raw program time `ms` would leave the needle mid-clip relative
             // to the new trim (looks like trimming the wrong edge). E already leaves the needle at clip tail.
@@ -520,9 +566,11 @@ final class TimelineViewModel {
 
     func rippleTrimEndToPlayhead() {
         let ms = playheadMs
+        let previousSourceRanges = keptSourceRangesByMediaFile()
         Task {
             await otioEngine.rippleTrimEndToPlayhead(playheadMs: ms)
             await refreshFromEngine()
+            notifySourceRangesChanged(from: previousSourceRanges)
             onTimelineChanged?()
         }
     }

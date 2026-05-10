@@ -387,7 +387,45 @@ final class TranscriptViewModel {
         )
     }
 
+    // MARK: - Timeline Sync
+
+    /// Marks transcript words as deleted when their source time range is no longer present on the
+    /// timeline. This is the reverse of transcript-driven ripple edits: timeline trims/deletes
+    /// become visible in the text editor without physically deleting transcription rows.
+    func markWordsDeletedByTimeline(
+        keptRangesByClipId: [Int64: [TimeRangeMs]],
+        affectedClipIds: Set<Int64>
+    ) {
+        guard let clipId = words.first?.clipId, affectedClipIds.contains(clipId) else { return }
+
+        let keptRanges = keptRangesByClipId[clipId, default: []]
+        var changed = false
+
+        for index in words.indices where words[index].clipId == clipId && !words[index].isDeleted {
+            if !Self.word(words[index], overlapsAny: keptRanges) {
+                words[index].isDeleted = true
+                changed = true
+            }
+        }
+
+        guard changed else { return }
+        selectedWordIds = selectedWordIds.filter { id in
+            words.contains { $0.id == id && !$0.isDeleted }
+        }
+        if let playingId = currentPlayingWordId,
+           words.first(where: { $0.id == playingId })?.isDeleted == true {
+            currentPlayingWordId = nil
+        }
+        persistWordStates()
+    }
+
     // MARK: - Helpers
+
+    private static func word(_ word: TranscriptWord, overlapsAny ranges: [TimeRangeMs]) -> Bool {
+        ranges.contains { range in
+            word.endMs > range.startMs && word.startMs < range.endMs
+        }
+    }
 
     private func persistWordStates() {
         Task.detached { [words, transcriptRepo] in
