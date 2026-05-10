@@ -73,6 +73,42 @@ final class TimelineViewModel {
         tracks.flatMap(\.clips)
     }
 
+    /// Converts an edit-program time into the source time for a concrete media file.
+    /// Transcript words are stored in source-clip time, while timeline playback reports program
+    /// time. Returning nil means the playhead is on a gap or on some other clip.
+    func sourceTimeMs(forProgramTimeMs programMs: Double, mediaFileId: Int64) -> Double? {
+        guard mediaFileId != 0 else { return nil }
+        let epsilon = 0.5
+        guard let clip = clips.first(where: { clip in
+            clip.mediaFileId == mediaFileId &&
+            clip.color != .gap &&
+            programMs >= clip.startMs - epsilon &&
+            programMs < clip.startMs + clip.durationMs + epsilon
+        }) else {
+            return nil
+        }
+
+        let offsetIntoTimelineClip = max(0, programMs - clip.startMs)
+        return clip.sourceStartMs + offsetIntoTimelineClip
+    }
+
+    /// Converts a source transcript timestamp back to program time for word-click seeking.
+    /// If the source range appears multiple times, prefer the earliest visible occurrence.
+    func programTimeMs(forSourceTimeMs sourceMs: Double, mediaFileId: Int64) -> Double? {
+        guard mediaFileId != 0 else { return nil }
+        let epsilon = 0.5
+        return clips
+            .filter { $0.mediaFileId == mediaFileId && $0.color != .gap }
+            .sorted { $0.startMs < $1.startMs }
+            .first { clip in
+                sourceMs >= clip.sourceStartMs - epsilon &&
+                sourceMs < clip.sourceStartMs + clip.sourceDurationMs + epsilon
+            }
+            .map { clip in
+                clip.startMs + max(0, sourceMs - clip.sourceStartMs)
+            }
+    }
+
     // MARK: - Build / Hydrate / Persist
 
     /// Loads OTIO from `Project.otioJSON` or creates an empty V1/A1 shell. Does **not** mirror media-bin selection.

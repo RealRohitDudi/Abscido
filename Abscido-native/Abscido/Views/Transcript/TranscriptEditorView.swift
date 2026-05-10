@@ -7,6 +7,7 @@ import Combine
 struct TranscriptEditorView: View {
     @Bindable var transcriptVM: TranscriptViewModel
     @Bindable var playerVM: PlayerViewModel
+    @Bindable var timelineVM: TimelineViewModel
     var onDeleteWords: () -> Void
 
     @State private var dragStartId: Int64?
@@ -111,7 +112,10 @@ struct TranscriptEditorView: View {
             transcriptVM.selectWord(wordId)
             // Seek player to word start
             if let word = transcriptVM.words.first(where: { $0.id == wordId }) {
-                playerVM.seek(to: word.startMs)
+                let seekMs = playerVM.timelinePlayheadTracksProgramTime
+                    ? timelineVM.programTimeMs(forSourceTimeMs: word.startMs, mediaFileId: word.clipId) ?? word.startMs
+                    : word.startMs
+                playerVM.seek(to: seekMs)
             }
         }
     }
@@ -125,8 +129,23 @@ struct TranscriptEditorView: View {
     private func setupTimeSync() {
         cancellable = playerVM.timeStream
             .receive(on: DispatchQueue.main)
-            .sink { [transcriptVM] timeMs in
-                transcriptVM.updatePlayingWord(timeMs: timeMs)
+            .sink { [transcriptVM, playerVM, timelineVM] timeMs in
+                guard playerVM.timelinePlayheadTracksProgramTime,
+                      let clipId = transcriptVM.words.first?.clipId
+                else {
+                    transcriptVM.updatePlayingWord(timeMs: timeMs)
+                    return
+                }
+
+                guard let sourceTimeMs = timelineVM.sourceTimeMs(
+                    forProgramTimeMs: timeMs,
+                    mediaFileId: clipId
+                ) else {
+                    transcriptVM.updatePlayingWord(timeMs: -1)
+                    return
+                }
+
+                transcriptVM.updatePlayingWord(timeMs: sourceTimeMs)
             }
     }
 }

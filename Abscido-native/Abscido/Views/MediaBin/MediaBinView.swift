@@ -72,14 +72,19 @@ struct MediaBinView: View {
                                         }
                                 }
                             }
-                            // Consume remaining vertical space without clearing bin selection —
-                            // a full-height invisible tap target made Transcribe look "broken"
-                            // (toolbar requires a selected clip).
                             Spacer(minLength: 8)
                                 .frame(maxWidth: .infinity, minHeight: 24)
-                                .allowsHitTesting(false)
                         }
                         .frame(minWidth: geo.size.width, minHeight: geo.size.height, alignment: .topLeading)
+                        // Taps that fall through clip rows (empty space) clear the selection
+                        // and signal WorkspaceView to switch the player back to the timeline.
+                        .background(
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedId = nil
+                                }
+                        )
                     }
                 }
             }

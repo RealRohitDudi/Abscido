@@ -58,6 +58,7 @@ struct WorkspaceView: View {
             TranscriptEditorView(
                 transcriptVM: transcriptVM,
                 playerVM: playerVM,
+                timelineVM: timelineVM,
                 onDeleteWords: handleDeleteWords
             )
             .navigationSplitViewColumnWidth(min: 250, ideal: 300, max: 400)
