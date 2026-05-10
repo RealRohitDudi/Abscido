@@ -81,6 +81,21 @@ final class TranscriptViewModel {
         }
     }
 
+    // MARK: - WhisperKit + language
+
+    /// Tiny/Base are unreliable for forced non‑English transcription; coerce to at least `.small`.
+    func ensureWhisperKitModelMatchesLanguage() {
+        guard selectedBackend == .whisperKit else { return }
+        let code = LanguageRegistry.normalizedLanguageCode(selectedLanguage) ?? "en"
+        let fitted = WhisperKitModelSize.effectiveForTranscription(
+            requested: whisperKitModelSize,
+            normalizedLanguageCode: code
+        )
+        if fitted != whisperKitModelSize {
+            whisperKitModelSize = fitted
+        }
+    }
+
     // MARK: - Transcription
 
     func transcribe(mediaFile: MediaFile) {
@@ -89,6 +104,8 @@ final class TranscriptViewModel {
         isTranscribing = true
         transcriptionProgress = 0
         transcriptionError = nil
+
+        ensureWhisperKitModelMatchesLanguage()
 
         let language = selectedLanguage
         let backend  = selectedBackend

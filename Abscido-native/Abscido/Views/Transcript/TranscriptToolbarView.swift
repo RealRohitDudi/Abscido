@@ -20,58 +20,19 @@ struct TranscriptToolbarView: View {
     var body: some View {
         VStack(spacing: 0) {
             mainToolbar
-            if let warning = nonEnglishModelWarning {
-                warningBanner(message: warning)
-            }
             if let error = transcriptVM.transcriptionError {
                 errorBanner(message: error)
             }
         }
     }
 
-    // MARK: - Non-English model warning
-
-    /// `tiny` / `base` are auto-upgraded to `small` for non-English; explain when UI choice ≠ checkpoint used.
-    private var nonEnglishModelWarning: String? {
-        guard transcriptVM.selectedBackend == .whisperKit,
-              !transcriptVM.isTranscribing,
-              transcriptVM.selectedLanguage != "en"
-        else { return nil }
+    /// Tiny/Base are English-first checkpoints; keep them off the menu when the transcript language is not English.
+    private var whisperKitModelsForCurrentLanguage: [WhisperKitModelSize] {
         let code = LanguageRegistry.normalizedLanguageCode(transcriptVM.selectedLanguage) ?? "en"
-        guard code != "en" else { return nil }
-        let effective = WhisperKitModelSize.effectiveForTranscription(
-            requested: transcriptVM.whisperKitModelSize,
-            normalizedLanguageCode: code
-        )
-        guard effective != transcriptVM.whisperKitModelSize else { return nil }
-        let langName = LanguageRegistry.language(forCode: transcriptVM.selectedLanguage)?.name
-            ?? transcriptVM.selectedLanguage.uppercased()
-        return "\(transcriptVM.whisperKitModelSize.shortLabel) cannot transcribe \(langName) reliably; this run uses the \(effective.shortLabel) Whisper checkpoint instead."
-    }
-
-    private func warningBanner(message: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.caption)
-                .foregroundColor(.yellow)
-
-            Text(message)
-                .font(.caption)
-                .foregroundColor(Color(white: 0.9))
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer()
+        if code == "en" {
+            return Array(WhisperKitModelSize.allCases)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color(red: 0.27, green: 0.20, blue: 0.06))
-        .overlay(
-            Rectangle()
-                .frame(height: 1)
-                .foregroundColor(Color.yellow.opacity(0.25)),
-            alignment: .top
-        )
+        return [.small, .largeV3Turbo]
     }
 
     // MARK: - Main Toolbar
@@ -103,7 +64,7 @@ struct TranscriptToolbarView: View {
             // WhisperKit model size picker (only visible when WhisperKit is selected)
             if transcriptVM.selectedBackend == .whisperKit {
                 Picker("Model", selection: $transcriptVM.whisperKitModelSize) {
-                    ForEach(WhisperKitModelSize.allCases, id: \.self) { size in
+                    ForEach(whisperKitModelsForCurrentLanguage, id: \.self) { size in
                         Text(size.shortLabel).tag(size)
                     }
                 }
@@ -152,6 +113,16 @@ struct TranscriptToolbarView: View {
         .padding(.vertical, 6)
         .background(Color(red: 0.141, green: 0.141, blue: 0.141))
         .animation(.easeInOut(duration: 0.15), value: transcriptVM.selectedBackend)
+        .onAppear { transcriptVM.ensureWhisperKitModelMatchesLanguage() }
+        .onChange(of: transcriptVM.selectedLanguage) { _, _ in
+            transcriptVM.ensureWhisperKitModelMatchesLanguage()
+        }
+        .onChange(of: transcriptVM.selectedBackend) { _, _ in
+            transcriptVM.ensureWhisperKitModelMatchesLanguage()
+        }
+        .onChange(of: transcriptVM.whisperKitModelSize) { _, _ in
+            transcriptVM.ensureWhisperKitModelMatchesLanguage()
+        }
     }
 
     // MARK: - Help Strings
@@ -168,11 +139,20 @@ struct TranscriptToolbarView: View {
     }
 
     private var modelPickerHelp: String {
+        let code = LanguageRegistry.normalizedLanguageCode(transcriptVM.selectedLanguage) ?? "en"
+        let suffix: String
+        if code != "en" {
+            suffix = transcriptVM.whisperKitModelSize == .largeV3Turbo
+                ? ""
+                : " For clearer Devanagari and fewer mis-hears in Hindi-like audio, Large v3 Turbo is worth the one-time download."
+        } else {
+            suffix = ""
+        }
         switch transcriptVM.whisperKitModelSize {
-        case .tiny:         return "Tiny (~75 MB). Fastest, English-only quality. Will produce wrong-script output for Hindi / Arabic / CJK audio."
-        case .base:         return "Base (~150 MB). Fast but English-only quality. Will produce wrong-script output for non-English audio."
-        case .small:        return "Small (~480 MB). Minimum recommended for non-English transcription. Solid quality / speed balance."
-        case .largeV3Turbo: return "Large v3 Turbo (~632 MB). Highest quality, ANE-accelerated. Recommended for Hindi, Arabic, CJK and any production work."
+        case .tiny:         return "Tiny (~75 MB). Fastest, English-focused. Not suited to Hindi / Arabic / CJK transcripts." + suffix
+        case .base:         return "Base (~150 MB). Quick English transcripts; not multilingual-reliable." + suffix
+        case .small:        return "Small (~480 MB). Minimum multilingual Whisper size offered here when language ≠ English." + suffix
+        case .largeV3Turbo: return "Large v3 Turbo (~632 MB). Best on-device Whisper quality — prefer this for Hindi, Arabic, and CJK." + suffix
         }
     }
 
@@ -299,12 +279,7 @@ struct TranscriptToolbarView: View {
         let lang = transcriptVM.selectedLanguage.uppercased()
         switch transcriptVM.selectedBackend {
         case .whisperKit:
-            let code = LanguageRegistry.normalizedLanguageCode(transcriptVM.selectedLanguage) ?? "en"
-            let model = WhisperKitModelSize.effectiveForTranscription(
-                requested: transcriptVM.whisperKitModelSize,
-                normalizedLanguageCode: code
-            )
-            return "WK·\(model.shortLabel)·\(lang)"
+            return "WK·\(transcriptVM.whisperKitModelSize.shortLabel)·\(lang)"
         case .appleSpeech: return "Apple·\(lang)"
         case .mlxWhisper:  return "MLX·\(lang)"
         }

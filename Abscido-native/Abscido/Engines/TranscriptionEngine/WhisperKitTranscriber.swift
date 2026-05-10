@@ -143,7 +143,33 @@ enum WhisperKitTranscriber {
         // Force the selected language when provided; otherwise allow auto-detection.
         let normalizedLanguage = LanguageRegistry.normalizedLanguageCode(language)
         let isForcedLanguage = normalizedLanguage != nil
-        let isForcedNonEnglish = isForcedLanguage && normalizedLanguage != "en"
+
+        // Per-model tuning. The strict fallback thresholds and the Devanagari/CJK/Cyrillic
+        // prefill seed below were calibrated for the *small* Whisper checkpoint, which without
+        // them drifts into Urdu/Arabic-script hallucinations on Hindi audio. The `largeV3Turbo`
+        // checkpoint is a distilled-decoder model with a different output distribution — these
+        // same knobs over-trigger on legit Devanagari output and cause WhisperKit to drop the
+        // entire decode window via SegmentSeeker.findSeekPointAndSegments (noSpeechProb > 0.6
+        // && avgLogProb ≤ -1.0). The result was zero transcribed words on a 10s Hindi clip with
+        // no error surfaced. For largeV3Turbo we keep WhisperKit's defaults; for smaller models
+        // we keep the existing protective overrides.
+        let usesAggressiveAntiHallucinationTuning = (modelSize != .largeV3Turbo)
+        let compressionRatioCap: Float? = usesAggressiveAntiHallucinationTuning ? 2.2 : 2.4
+        let noSpeechCutoff: Float? = usesAggressiveAntiHallucinationTuning ? 0.6 : 0.8
+
+        // Only feed a script-priming prompt to checkpoints that genuinely benefit from it.
+        // Computing this BEFORE building DecodingOptions lets us also enable the KV prefill
+        // cache when no promptTokens are supplied (TextDecoder skips the cache branch when
+        // promptTokens != nil — see prefillDecoderInputs).
+        let promptTokens: [Int]? = {
+            guard usesAggressiveAntiHallucinationTuning,
+                  let code = normalizedLanguage,
+                  code != "en",
+                  let seed = LanguageRegistry.promptSeedText(forNormalizedCode: code),
+                  let tokenizer = whisperKit.tokenizer
+            else { return nil }
+            return tokenizer.encode(text: seed)
+        }()
 
         var options = DecodingOptions(
             verbose: false,
@@ -154,12 +180,12 @@ enum WhisperKitTranscriber {
             temperature: 0.0,
             temperatureFallbackCount: 5,
             usePrefillPrompt: true,
-            // When we attach `promptTokens` for script priming WhisperKit already bypasses the
-            // KV prefill cache (see TextDecoder.prefillDecoderInputs — the cache branch checks
-            // `promptTokens == nil`). Disable it explicitly for forced non-English so the intent
-            // is obvious in code and we never silently fall back to a cached English-prefilled
-            // KV state on a future WhisperKit version.
-            usePrefillCache: !isForcedNonEnglish,
+            // Enable the KV prefill cache when we are *not* attaching promptTokens.
+            // WhisperKit's prefill cache branch already requires `promptTokens == nil`
+            // (see TextDecoder.prefillDecoderInputs); turning it on here lets largeV3Turbo
+            // skip a redundant decode pass for the SOT/<|lang|>/<|transcribe|> prefix, which
+            // is what allows it to reliably emit segments on short non-English clips.
+            usePrefillCache: promptTokens == nil,
             detectLanguage: !isForcedLanguage,
             skipSpecialTokens: true,
             withoutTimestamps: false,
@@ -167,25 +193,20 @@ enum WhisperKitTranscriber {
             // Suppress the empty / blank-padding tokens; helps prevent "thank you for watching"
             // / "..." style hallucinations when the audio is sparse.
             suppressBlank: true,
-            // Slightly stricter than WhisperKit's defaults — rejects the repetitive-script
-            // hallucination loops the small models fall into on Indic / Arabic audio.
-            compressionRatioThreshold: 2.2,
+            compressionRatioThreshold: compressionRatioCap,
             logProbThreshold: -1.0,
-            noSpeechThreshold: 0.6
+            noSpeechThreshold: noSpeechCutoff
         )
 
-        // If the user explicitly picked a non-English language, prime the decoder with a real
-        // multi-sentence seed in the target script. The `<|xx|>` language token alone is a SOFT
-        // bias — for languages whose audio overlaps with another script (Hindi/Urdu being the
-        // canonical case) only a script-specific prefill prompt reliably keeps Whisper on the
-        // intended writing system.
-        if let code = normalizedLanguage,
-           code != "en",
-           let seed = LanguageRegistry.promptSeedText(forNormalizedCode: code),
-           let tokenizer = whisperKit.tokenizer
-        {
-            options.promptTokens = tokenizer.encode(text: seed)
-        }
+        // If the user explicitly picked a non-English language AND the model needs the script
+        // prior, prime the decoder with a real multi-sentence seed in the target script. The
+        // `<|xx|>` language token alone is a SOFT bias — for languages whose audio overlaps
+        // with another script (Hindi/Urdu being the canonical case) only a script-specific
+        // prefill prompt reliably keeps the small Whisper model on the intended writing system.
+        // largeV3Turbo handles non-English natively and does *not* benefit from this seed; in
+        // fact its 4-layer distilled decoder over-attends to the prompt and produces low
+        // avgLogProb segments that get dropped downstream.
+        options.promptTokens = promptTokens
 
         // MARK: Run transcription
         let results: [TranscriptionResult]
@@ -227,6 +248,21 @@ enum WhisperKitTranscriber {
                     confidence: Double(timing.probability)
                 ))
             }
+        }
+
+        // If WhisperKit returns zero usable words, surface a clear failure instead of letting
+        // the UI snap back to "No transcript" with no indication of what happened. The most
+        // common cause is SegmentSeeker dropping every window because of strict noSpeech /
+        // logProb thresholds — usually triggered by a forced language that doesn't match the
+        // audio, very quiet audio, or a too-aggressive script prefill on a distilled model.
+        if words.isEmpty {
+            let langName = LanguageRegistry.language(forCode: language)?.name
+                ?? language.uppercased()
+            let segmentTotal = results.reduce(0) { $0 + $1.segments.count }
+            let detail = segmentTotal == 0
+                ? "WhisperKit ran the \(modelSize.shortLabel) model but produced no segments. The audio is likely silent, very quiet, or the spoken language does not match the forced language (\(langName))."
+                : "WhisperKit produced segments but no recognised words. Try a different model size or switch the language to match the audio."
+            throw AbscidoError.transcriptionFailed(clipId: clipId, pythonError: detail)
         }
 
         onProgress(1.0)
