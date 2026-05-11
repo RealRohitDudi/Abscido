@@ -96,7 +96,7 @@ struct AbscidoApp: App {
                 .modifier(DynamicShortcut(action: .pasteClips))
 
                 Button("Delete Clips") {
-                    coordinator.timelineVM.deleteSelected()
+                    _ = coordinator.handlePrimaryDeleteKey()
                 }
                 .modifier(DynamicShortcut(action: .deleteClips))
 

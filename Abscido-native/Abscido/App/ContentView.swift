@@ -85,26 +85,6 @@ struct ContentView: View {
         coordinator.aiVM.detectBadTakes(words: coordinator.transcriptVM.words)
     }
 
-    private func handleDelete() {
-        guard let file = coordinator.projectVM.mediaFiles.first else { return }
-        if coordinator.transcriptVM.deleteSelectedWords(mediaFile: file) != nil {
-            let allDecisions = coordinator.transcriptVM.computeAllEditDecisions(
-                mediaFiles: coordinator.projectVM.mediaFiles
-            )
-            coordinator.timelineVM.rebuild(
-                editDecisions: allDecisions,
-                mediaFiles: coordinator.projectVM.mediaFiles
-            )
-            Task {
-                let composition = try await CompositionBuilder.build(
-                    from: allDecisions,
-                    mediaFiles: coordinator.projectVM.mediaFiles
-                )
-                coordinator.playerVM.loadComposition(composition)
-            }
-        }
-    }
-
     // MARK: - Sheets
 
     private var newProjectSheet: some View {

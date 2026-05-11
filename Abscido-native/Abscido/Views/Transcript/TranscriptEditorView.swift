@@ -3,15 +3,16 @@ import Combine
 
 /// CORE FEATURE: The transcript-as-timeline editor.
 /// Renders words as individual views with custom FlowLayout for natural text wrapping.
-/// NOT a TextEditor — each word is a clickable, selectable, highlightable View element.
+/// NOT a TextEditor — each word is an individual SwiftUI View for selection and playback sync.
 struct TranscriptEditorView: View {
     @Bindable var transcriptVM: TranscriptViewModel
     @Bindable var playerVM: PlayerViewModel
     @Bindable var timelineVM: TimelineViewModel
     var onDeleteWords: () -> Void
 
-    @State private var dragStartId: Int64?
     @State private var cancellable: AnyCancellable?
+
+    private static let transcriptScrollSpace = "transcriptScrollContent"
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -21,33 +22,68 @@ struct TranscriptEditorView: View {
                 } else if transcriptVM.words.isEmpty {
                     emptyView
                 } else {
-                    transcriptContent(proxy: proxy)
+                    transcriptScrollBody(proxy: proxy)
                 }
             }
         }
         .background(Color(red: 0.102, green: 0.102, blue: 0.102))
-        .onAppear { setupTimeSync() }
+        .onAppear {
+            setupTimeSync()
+            syncTranscriptHighlightToTimeline()
+        }
         .onDisappear { cancellable?.cancel() }
+        .onChange(of: transcriptVM.selectedWordIds) { _, _ in
+            syncTranscriptHighlightToTimeline()
+        }
+        .onChange(of: transcriptVM.words) { _, _ in
+            syncTranscriptHighlightToTimeline()
+        }
+        .onChange(of: timelineVM.timelineStructureRevision) { _, _ in
+            syncTranscriptHighlightToTimeline()
+        }
+    }
+
+    private func syncTranscriptHighlightToTimeline() {
+        timelineVM.updateTranscriptSelectionHighlight(
+            words: transcriptVM.words,
+            selectedWordIds: transcriptVM.selectedWordIds
+        )
     }
 
     // MARK: - Transcript Content
 
     @ViewBuilder
-    private func transcriptContent(proxy: ScrollViewProxy) -> some View {
-        LazyVStack(alignment: .leading, spacing: 12) {
-            ForEach(transcriptVM.segments) { segment in
-                TranscriptSegmentView(
-                    segment: segment,
-                    words: wordsForSegment(segment),
-                    selectedWordIds: transcriptVM.selectedWordIds,
-                    playingWordId: transcriptVM.currentPlayingWordId,
-                    onTapWord: handleTapWord,
-                    onDragStart: { id in dragStartId = id },
-                    onDragUpdate: { id in handleDragUpdate(id) }
-                )
-                .id(segment.id)
+    private func transcriptScrollBody(proxy: ScrollViewProxy) -> some View {
+        ZStack(alignment: .topLeading) {
+            // Tap below / beside wrapped text to clear selection (words sit in a layer above).
+            Color.clear
+                .contentShape(Rectangle())
+                .frame(maxWidth: .infinity, minHeight: 560)
+                .onTapGesture {
+                    transcriptVM.clearSelection()
+                    syncTranscriptHighlightToTimeline()
+                }
+
+            LazyVStack(alignment: .leading, spacing: 12) {
+                ForEach(transcriptVM.segments) { segment in
+                    let segWords = wordsForSegment(segment)
+                    TranscriptSegmentView(
+                        segment: segment,
+                        words: segWords,
+                        selectedWordIds: transcriptVM.selectedWordIds,
+                        playingWordId: transcriptVM.currentPlayingWordId,
+                        transcriptCoordinateSpace: Self.transcriptScrollSpace,
+                        segmentWordIds: Set(segWords.map(\.id)),
+                        onTapWord: handleTapWord,
+                        onDragSelectRange: { startId, endId in
+                            transcriptVM.applyDragSelection(startWordId: startId, endWordId: endId)
+                        }
+                    )
+                    .id(segment.id)
+                }
             }
         }
+        .coordinateSpace(name: Self.transcriptScrollSpace)
         .padding(16)
         .onChange(of: transcriptVM.currentPlayingWordId) { _, newId in
             if let wordId = newId,
@@ -104,25 +140,19 @@ struct TranscriptEditorView: View {
     }
 
     private func handleTapWord(_ wordId: Int64) {
-        if NSEvent.modifierFlags.contains(.shift), let lastSelected = transcriptVM.selectedWordIds.first {
-            transcriptVM.selectRange(from: lastSelected, to: wordId)
+        if NSEvent.modifierFlags.contains(.shift) {
+            let pivot = transcriptVM.selectionAnchorWordId ?? wordId
+            transcriptVM.selectRange(from: pivot, to: wordId)
         } else if NSEvent.modifierFlags.contains(.command) {
             transcriptVM.toggleWordSelection(wordId)
         } else {
             transcriptVM.selectWord(wordId)
-            // Seek player to word start
             if let word = transcriptVM.words.first(where: { $0.id == wordId }) {
                 let seekMs = playerVM.timelinePlayheadTracksProgramTime
                     ? timelineVM.programTimeMs(forSourceTimeMs: word.startMs, mediaFileId: word.clipId) ?? word.startMs
                     : word.startMs
                 playerVM.seek(to: seekMs)
             }
-        }
-    }
-
-    private func handleDragUpdate(_ wordId: Int64) {
-        if let startId = dragStartId {
-            transcriptVM.selectRange(from: startId, to: wordId)
         }
     }
 

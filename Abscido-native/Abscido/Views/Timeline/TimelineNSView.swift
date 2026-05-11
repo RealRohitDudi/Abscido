@@ -35,6 +35,7 @@ struct TimelineNSView: NSViewRepresentable {
     var selectedClipIds: Set<String>
     var waveformRevision: Int
     var timelineStructureRevision: Int
+    var transcriptHighlightRevision: Int
 
     init(timelineVM: TimelineViewModel, playerVM: PlayerViewModel, mediaFiles: [MediaFile]) {
         self.timelineVM = timelineVM
@@ -46,6 +47,7 @@ struct TimelineNSView: NSViewRepresentable {
         self.selectedClipIds = timelineVM.selectedClipIds
         self.waveformRevision = timelineVM.waveformRevision
         self.timelineStructureRevision = timelineVM.timelineStructureRevision
+        self.transcriptHighlightRevision = timelineVM.transcriptHighlightRevision
     }
 
     func makeNSView(context: Context) -> TimelineScrollContainer {
@@ -69,6 +71,7 @@ struct TimelineNSView: NSViewRepresentable {
             || coord.lastSelectedClipIds != selectedClipIds
             || coord.lastWaveformRevision != waveformRevision
             || coord.lastTimelineStructureRevision != timelineStructureRevision
+            || coord.lastTranscriptHighlightRevision != transcriptHighlightRevision
 
         if needsRebuild {
             coord.lastTrackCount = trackCount
@@ -77,6 +80,7 @@ struct TimelineNSView: NSViewRepresentable {
             coord.lastSelectedClipIds = selectedClipIds
             coord.lastWaveformRevision = waveformRevision
             coord.lastTimelineStructureRevision = timelineStructureRevision
+            coord.lastTranscriptHighlightRevision = transcriptHighlightRevision
             coord.rebuildLayers()
         }
 
@@ -252,7 +256,14 @@ final class TimelineContentView: NSView, NSDraggingSource {
 
     // MARK: - Rebuild all clip layers
 
-    func rebuildLayers(tracks: [TimelineViewModel.TrackModel], trackHeights: [Int: CGFloat], pps: Double, waveformData: [Int64: [Float]]) {
+    func rebuildLayers(
+        tracks: [TimelineViewModel.TrackModel],
+        trackHeights: [Int: CGFloat],
+        pps: Double,
+        waveformData: [Int64: [Float]],
+        transcriptHighlightProgramRangesMs: [TimeRangeMs],
+        transcriptHighlightMediaFileId: Int64?
+    ) {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
 
@@ -297,7 +308,28 @@ final class TimelineContentView: NSView, NSDraggingSource {
                 let clipLayer = makeClipLayer(clip: clip, kind: track.kind, x: clipX, width: clipW, height: tHeight, waveformData: waveformData)
                 trackBg.addSublayer(clipLayer)
             }
-            
+
+            if let mid = transcriptHighlightMediaFileId, mid != 0 {
+                let trackShowsMedia = track.clips.contains { clip in
+                    guard clip.color != .gap, clip.mediaFileId == mid else { return false }
+                    return true
+                }
+                if trackShowsMedia {
+                    for hl in transcriptHighlightProgramRangesMs {
+                        let hx = CGFloat(hl.startMs / 1000.0 * pps)
+                        let hw = max(2, CGFloat(hl.durationMs / 1000.0 * pps))
+                        let band = CALayer()
+                        band.frame = CGRect(x: hx, y: 1, width: hw, height: tHeight - 2)
+                        band.cornerRadius = 3
+                        band.backgroundColor = NSColor.systemRed.withAlphaComponent(0.38).cgColor
+                        band.borderColor = NSColor.systemRed.withAlphaComponent(0.65).cgColor
+                        band.borderWidth = 0.5
+                        band.zPosition = 8
+                        trackBg.addSublayer(band)
+                    }
+                }
+            }
+
             currentY += tHeight
         }
 
@@ -675,6 +707,7 @@ class TimelineCoordinator: NSObject {
     var lastSelectedClipIds: Set<String> = []
     var lastWaveformRevision: Int = -1
     var lastTimelineStructureRevision: Int = -1
+    var lastTranscriptHighlightRevision: Int = -1
 
     private var basePixelsPerSecond: Double = 100
     private var pinchAnchorTimeMs: Double?
@@ -751,7 +784,9 @@ class TimelineCoordinator: NSObject {
             tracks: timelineVM.tracks,
             trackHeights: timelineVM.trackHeights,
             pps: timelineVM.pixelsPerSecond,
-            waveformData: timelineVM.waveformData
+            waveformData: timelineVM.waveformData,
+            transcriptHighlightProgramRangesMs: timelineVM.transcriptHighlightProgramRangesMs,
+            transcriptHighlightMediaFileId: timelineVM.transcriptHighlightMediaFileId
         )
         updateContentSize()
         updatePlayheadOnly()

@@ -6,13 +6,17 @@ struct TranscriptSegmentView: View {
     let words: [TranscriptWord]
     let selectedWordIds: Set<Int64>
     let playingWordId: Int64?
+    let transcriptCoordinateSpace: String
+    /// Word IDs belonging to this segment — hit-testing ignores rects from other segments in the merged preference.
+    let segmentWordIds: Set<Int64>
     var onTapWord: (Int64) -> Void
-    var onDragStart: (Int64) -> Void
-    var onDragUpdate: (Int64) -> Void
+    var onDragSelectRange: (Int64, Int64) -> Void
+
+    @State private var wordRects: [Int64: CGRect] = [:]
+    @State private var dragExceededTapThreshold = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            // Timestamp label
             HStack(spacing: 6) {
                 Text(TimecodeFormatter.formatShort(ms: segment.startMs))
                     .font(.system(.caption2, design: .monospaced))
@@ -23,21 +27,60 @@ struct TranscriptSegmentView: View {
                     .frame(height: 0.5)
             }
 
-            // Word flow layout
             FlowLayout(spacing: 2) {
                 ForEach(words) { word in
                     TranscriptWordView(
                         word: word,
                         isSelected: selectedWordIds.contains(word.id),
                         isPlaying: word.id == playingWordId,
-                        onTap: onTapWord,
-                        onDragStart: onDragStart,
-                        onDragUpdate: onDragUpdate
+                        transcriptCoordinateSpace: transcriptCoordinateSpace
                     )
                 }
             }
+            .contentShape(Rectangle())
+            .simultaneousGesture(segmentDragGesture)
         }
         .padding(.horizontal, 4)
+        .onPreferenceChange(TranscriptWordRectKey.self) { rects in
+            wordRects = rects
+        }
+    }
+
+    private var segmentDragGesture: some Gesture {
+        DragGesture(minimumDistance: 0, coordinateSpace: .named(transcriptCoordinateSpace))
+            .onChanged { value in
+                let dist = hypot(value.translation.width, value.translation.height)
+                if dist > 6 {
+                    dragExceededTapThreshold = true
+                }
+                let startId = wordId(at: value.startLocation)
+                let endId = wordId(at: value.location) ?? startId
+                // Live marquee once the pointer moves enough, or as soon as we cross into another word.
+                guard let s = startId, let e = endId else { return }
+                if dist > 6 || s != e {
+                    onDragSelectRange(s, e)
+                }
+            }
+            .onEnded { value in
+                let dist = hypot(value.translation.width, value.translation.height)
+                let startW = wordId(at: value.startLocation)
+                let endW = wordId(at: value.location)
+                let crossedWords = startW != nil && endW != nil && startW != endW
+                let treatAsMarquee = dragExceededTapThreshold || crossedWords
+                if !treatAsMarquee, dist < 10, let w = startW {
+                    onTapWord(w)
+                }
+                dragExceededTapThreshold = false
+            }
+    }
+
+    /// Picks the word under `point` using rects from this segment only (same scroll coordinate space).
+    private func wordId(at point: CGPoint) -> Int64? {
+        let candidates = wordRects.filter { segmentWordIds.contains($0.key) }
+        let hits = candidates.filter { $0.value.contains(point) }
+        if hits.isEmpty { return nil }
+        if hits.count == 1 { return hits.first?.key }
+        return hits.min(by: { $0.value.width * $0.value.height < $1.value.width * $1.value.height })?.key
     }
 }
 
@@ -86,7 +129,6 @@ struct FlowLayout: Layout {
             let size = subview.sizeThatFits(.unspecified)
 
             if currentX + size.width > maxWidth && currentX > 0 {
-                // Wrap to next line
                 currentX = 0
                 currentY += lineHeight + spacing
                 lineHeight = 0

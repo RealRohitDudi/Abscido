@@ -121,6 +121,55 @@ final class AppCoordinator {
         transcriptVM.selectAll()
     }
 
+    /// Delete key / menu: timeline clip selection wins; otherwise ripple-delete selected transcript words.
+    @discardableResult
+    func handlePrimaryDeleteKey() -> Bool {
+        if !timelineVM.selectedClipIds.isEmpty {
+            timelineVM.deleteSelected()
+            return true
+        }
+        guard !transcriptVM.selectedWordIds.isEmpty else { return false }
+        deleteTranscriptSelectionAndRebuildTimeline()
+        return true
+    }
+
+    /// Toolbar / transcript panel — same OTIO + player rebuild as the keyboard path.
+    func deleteTranscriptSelectionAndRebuildTimeline() {
+        guard !transcriptVM.selectedWordIds.isEmpty else { return }
+        guard let file = transcriptMediaFileForCurrentDeletion() else { return }
+        guard transcriptVM.deleteSelectedWords(mediaFile: file) != nil else { return }
+
+        let allDecisions = transcriptVM.computeAllEditDecisions(mediaFiles: projectVM.mediaFiles)
+        timelineVM.rebuild(editDecisions: allDecisions, mediaFiles: projectVM.mediaFiles)
+
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let composition = try await CompositionBuilder.build(
+                    from: allDecisions,
+                    mediaFiles: projectVM.mediaFiles
+                )
+                await MainActor.run {
+                    self.playerVM.loadComposition(composition)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private func transcriptMediaFileForCurrentDeletion() -> MediaFile? {
+        if let id = transcriptVM.words.first(where: { transcriptVM.selectedWordIds.contains($0.id) })?.clipId {
+            return projectVM.mediaFile(forId: id)
+        }
+        if let id = transcriptVM.words.first?.clipId {
+            return projectVM.mediaFile(forId: id)
+        }
+        return nil
+    }
+
     func compileEdit() {
         guard let project = projectVM.currentProject else { return }
         guard transcriptVM.hasTranscript else { return }

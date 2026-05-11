@@ -10,14 +10,13 @@ enum WordDisplayState {
     case selected
 }
 
-/// Single word view with state-based styling and interaction.
+/// Single word view — interaction is handled at the segment level (drag / hit-testing).
 struct TranscriptWordView: View {
     let word: TranscriptWord
     let isSelected: Bool
     let isPlaying: Bool
-    var onTap: (Int64) -> Void
-    var onDragStart: (Int64) -> Void
-    var onDragUpdate: (Int64) -> Void
+    /// Shared scroll content space so all word rects live in one coordinate system.
+    let transcriptCoordinateSpace: String
 
     private var displayState: WordDisplayState {
         if word.isDeleted && word.isBadTake { return .badAccepted }
@@ -34,24 +33,25 @@ struct TranscriptWordView: View {
             .modifier(WordStyleModifier(state: displayState))
             .padding(.horizontal, 2)
             .padding(.vertical, 1)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                onTap(word.id)
-            }
-            .gesture(
-                DragGesture(minimumDistance: 4)
-                    .onChanged { _ in
-                        onDragUpdate(word.id)
-                    }
-                    .onEnded { _ in }
-            )
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { _ in
-                        onDragStart(word.id)
-                    }
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: TranscriptWordRectKey.self,
+                        value: [word.id: geo.frame(in: .named(transcriptCoordinateSpace))]
+                    )
+                }
             )
             .id(word.id)
+    }
+}
+
+// MARK: - Word rects in scroll content (shared across segments)
+
+struct TranscriptWordRectKey: PreferenceKey {
+    static var defaultValue: [Int64: CGRect] = [:]
+
+    static func reduce(value: inout [Int64: CGRect], nextValue: () -> [Int64: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { $1 })
     }
 }
 

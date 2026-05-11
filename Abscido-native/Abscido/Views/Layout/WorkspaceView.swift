@@ -3,6 +3,8 @@ import SwiftUI
 /// Root workspace layout — NavigationSplitView with 3 columns:
 /// Sidebar: MediaBin | Content: Player + TranscribeBar + Timeline | Detail: Transcript
 struct WorkspaceView: View {
+    @Environment(AppCoordinator.self) private var coordinator
+
     @State var projectVM: ProjectViewModel
     @State var transcriptVM: TranscriptViewModel
     @State var playerVM: PlayerViewModel
@@ -178,10 +180,7 @@ struct WorkspaceView: View {
     }
 
     private func handleDeleteWords() {
-        guard let file = transcriptSourceMedia else { return }
-        if let editDecision = transcriptVM.deleteSelectedWords(mediaFile: file) {
-            rebuildComposition(editDecision: editDecision)
-        }
+        coordinator.deleteTranscriptSelectionAndRebuildTimeline()
     }
 
     private func handleEditDecisionChanged(_ editDecision: EditDecision) {

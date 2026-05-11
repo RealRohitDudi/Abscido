@@ -116,10 +116,8 @@ final class ShortcutEventHandler {
         case .pasteClips:
             coordinator.timelineVM.pasteAtPlayhead()
         case .deleteClips:
-            if !coordinator.timelineVM.selectedClipIds.isEmpty {
-                coordinator.timelineVM.deleteSelected()
-            } else {
-                return false // Pass through so transcript word deletion can handle it
+            if !coordinator.handlePrimaryDeleteKey() {
+                return false
             }
         case .linkClips:
             coordinator.timelineVM.linkSelected()

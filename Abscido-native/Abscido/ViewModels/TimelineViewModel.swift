@@ -61,6 +61,13 @@ final class TimelineViewModel {
     /// `totalDurationMs` is unchanged (e.g. deleting all audio while video still sets max duration).
     var timelineStructureRevision: Int = 0
 
+    /// Program-time spans (ms) for semi-transparent red overlays — driven by transcript word selection.
+    var transcriptHighlightProgramRangesMs: [TimeRangeMs] = []
+    /// Source media for the current highlight; overlays are drawn only on tracks that show this file.
+    var transcriptHighlightMediaFileId: Int64?
+    /// Bumps when highlight inputs change so `TimelineNSView` can dirty-check cheaply.
+    var transcriptHighlightRevision: Int = 0
+
     /// Callback to notify parent when timeline changes require composition rebuild.
     var onTimelineChanged: (() -> Void)?
     /// Callback for transcript sync after destructive timeline edits. The dictionary contains
@@ -143,6 +150,76 @@ final class TimelineViewModel {
             .map { clip in
                 clip.startMs + max(0, sourceMs - clip.sourceStartMs)
             }
+    }
+
+    /// Maps a source-file interval onto timeline **program** intervals (handles splits / multi-clip layout).
+    func programIntervals(forSourceRangeMs range: TimeRangeMs, mediaFileId: Int64) -> [TimeRangeMs] {
+        guard mediaFileId != 0, range.endMs > range.startMs else { return [] }
+        let epsilon = 0.5
+        var results: [TimeRangeMs] = []
+        let sorted = clips
+            .filter { $0.mediaFileId == mediaFileId && $0.color != .gap }
+            .sorted { $0.startMs < $1.startMs }
+        for clip in sorted {
+            let srcStart = clip.sourceStartMs
+            let srcEnd = clip.sourceStartMs + clip.sourceDurationMs
+            let overlapStart = max(range.startMs, srcStart)
+            let overlapEnd = min(range.endMs, srcEnd)
+            guard overlapEnd > overlapStart + 0.001 else { continue }
+            let progStart = clip.startMs + max(0, overlapStart - srcStart)
+            let progEnd = clip.startMs + max(0, overlapEnd - srcStart)
+            results.append(TimeRangeMs(startMs: progStart, endMs: progEnd))
+        }
+        return Self.mergeAdjacentProgramIntervals(results, gapEpsilonMs: epsilon)
+    }
+
+    /// Recomputes red-zone overlay ranges from the current transcript selection (source times → program times).
+    func updateTranscriptSelectionHighlight(words: [TranscriptWord], selectedWordIds: Set<Int64>) {
+        guard !selectedWordIds.isEmpty else {
+            if !transcriptHighlightProgramRangesMs.isEmpty || transcriptHighlightMediaFileId != nil {
+                transcriptHighlightProgramRangesMs = []
+                transcriptHighlightMediaFileId = nil
+                transcriptHighlightRevision &+= 1
+            }
+            return
+        }
+
+        let selected = words.filter { selectedWordIds.contains($0.id) && !$0.isDeleted }
+        guard let mediaId = selected.first?.clipId else {
+            transcriptHighlightProgramRangesMs = []
+            transcriptHighlightMediaFileId = nil
+            transcriptHighlightRevision &+= 1
+            return
+        }
+
+        var intervals: [TimeRangeMs] = []
+        for w in selected.sorted(by: { $0.startMs < $1.startMs }) {
+            let r = TimeRangeMs(startMs: w.startMs, endMs: w.endMs)
+            intervals.append(contentsOf: programIntervals(forSourceRangeMs: r, mediaFileId: mediaId))
+        }
+        let merged = Self.mergeAdjacentProgramIntervals(intervals, gapEpsilonMs: 1.0)
+        if merged != transcriptHighlightProgramRangesMs || transcriptHighlightMediaFileId != mediaId {
+            transcriptHighlightProgramRangesMs = merged
+            transcriptHighlightMediaFileId = mediaId
+            transcriptHighlightRevision &+= 1
+        }
+    }
+
+    private static func mergeAdjacentProgramIntervals(_ ranges: [TimeRangeMs], gapEpsilonMs: Double) -> [TimeRangeMs] {
+        guard !ranges.isEmpty else { return [] }
+        let sorted = ranges.sorted { $0.startMs < $1.startMs }
+        var out: [TimeRangeMs] = []
+        var cur = sorted[0]
+        for r in sorted.dropFirst() {
+            if r.startMs <= cur.endMs + gapEpsilonMs {
+                cur = TimeRangeMs(startMs: cur.startMs, endMs: max(cur.endMs, r.endMs))
+            } else {
+                out.append(cur)
+                cur = r
+            }
+        }
+        out.append(cur)
+        return out
     }
 
     // MARK: - Build / Hydrate / Persist

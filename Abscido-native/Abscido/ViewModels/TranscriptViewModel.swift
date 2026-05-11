@@ -32,6 +32,8 @@ final class TranscriptViewModel {
     var words: [TranscriptWord] = []
     var segments: [TranscriptSegment] = []
     var selectedWordIds: Set<Int64> = []
+    /// Last “focus” word for Shift+click range extension (stable unlike `Set.first`).
+    var selectionAnchorWordId: Int64?
     var currentPlayingWordId: Int64?
     var isTranscribing = false
     var transcriptionProgress: Double = 0
@@ -73,6 +75,7 @@ final class TranscriptViewModel {
             words = try transcriptRepo.fetchWords(clipId: clipId)
             segments = try transcriptRepo.fetchSegments(clipId: clipId)
             selectedWordIds = []
+            selectionAnchorWordId = nil
             undoStack = []
             redoStack = []
         } catch {
@@ -252,30 +255,54 @@ final class TranscriptViewModel {
 
     func selectWord(_ wordId: Int64) {
         selectedWordIds = [wordId]
+        selectionAnchorWordId = wordId
     }
 
     func toggleWordSelection(_ wordId: Int64) {
         if selectedWordIds.contains(wordId) {
             selectedWordIds.remove(wordId)
+            if selectionAnchorWordId == wordId {
+                let remaining = words.filter { selectedWordIds.contains($0.id) && !$0.isDeleted }
+                    .sorted { $0.startMs < $1.startMs }
+                selectionAnchorWordId = remaining.first?.id
+            }
         } else {
             selectedWordIds.insert(wordId)
         }
+        selectionAnchorWordId = wordId
     }
 
+    /// Includes every non-deleted word between `startId` and `endId` in **source time order** (not DB row order).
+    /// Does not change `selectionAnchorWordId` — used for Shift+extend from the existing pivot.
     func selectRange(from startId: Int64, to endId: Int64) {
-        guard let startIdx = words.firstIndex(where: { $0.id == startId }),
-              let endIdx = words.firstIndex(where: { $0.id == endId }) else { return }
+        let active = words.filter { !$0.isDeleted }.sorted { $0.startMs < $1.startMs }
+        guard let startIdx = active.firstIndex(where: { $0.id == startId }),
+              let endIdx = active.firstIndex(where: { $0.id == endId }) else { return }
 
         let range = min(startIdx, endIdx)...max(startIdx, endIdx)
-        selectedWordIds = Set(words[range].filter { !$0.isDeleted }.map(\.id))
+        selectedWordIds = Set(active[range].map(\.id))
+    }
+
+    /// Drag-to-select: sets selection and moves the Shift+click pivot to the chronologically first word in the range.
+    func applyDragSelection(startWordId: Int64, endWordId: Int64) {
+        let active = words.filter { !$0.isDeleted }.sorted { $0.startMs < $1.startMs }
+        guard let startIdx = active.firstIndex(where: { $0.id == startWordId }),
+              let endIdx = active.firstIndex(where: { $0.id == endWordId }) else { return }
+
+        let range = min(startIdx, endIdx)...max(startIdx, endIdx)
+        selectedWordIds = Set(active[range].map(\.id))
+        selectionAnchorWordId = active[min(startIdx, endIdx)].id
     }
 
     func selectAll() {
-        selectedWordIds = Set(words.filter { !$0.isDeleted }.map(\.id))
+        let active = words.filter { !$0.isDeleted }.sorted { $0.startMs < $1.startMs }
+        selectedWordIds = Set(active.map(\.id))
+        selectionAnchorWordId = active.first?.id
     }
 
     func clearSelection() {
         selectedWordIds = []
+        selectionAnchorWordId = nil
     }
 
     // MARK: - Delete Flow (core product loop)
@@ -294,6 +321,7 @@ final class TranscriptViewModel {
 
         persistWordStates()
         selectedWordIds = []
+        selectionAnchorWordId = nil
 
         return RippleEditStrategy.computeEditDecision(
             words: words,
@@ -316,6 +344,7 @@ final class TranscriptViewModel {
         words = previousState
         persistWordStates()
         selectedWordIds = []
+        selectionAnchorWordId = nil
         return true
     }
 
@@ -325,6 +354,7 @@ final class TranscriptViewModel {
         words = nextState
         persistWordStates()
         selectedWordIds = []
+        selectionAnchorWordId = nil
         return true
     }
 
@@ -411,6 +441,9 @@ final class TranscriptViewModel {
         guard changed else { return }
         selectedWordIds = selectedWordIds.filter { id in
             words.contains { $0.id == id && !$0.isDeleted }
+        }
+        if let anchor = selectionAnchorWordId, !selectedWordIds.contains(anchor) {
+            selectionAnchorWordId = nil
         }
         if let playingId = currentPlayingWordId,
            words.first(where: { $0.id == playingId })?.isDeleted == true {
