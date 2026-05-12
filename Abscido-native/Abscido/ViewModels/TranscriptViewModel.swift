@@ -2,7 +2,6 @@ import Combine
 import Dispatch
 import Foundation
 import Security
-import Speech
 
 /// Weak bridge — progress hops to main without capturing `Task.detached`'s `self`. Throttled to avoid flooding the event loop.
 private final class TranscriptionProgressRelay: @unchecked Sendable {
@@ -32,7 +31,7 @@ final class TranscriptViewModel {
     var words: [TranscriptWord] = []
     var segments: [TranscriptSegment] = []
     var selectedWordIds: Set<Int64> = []
-    /// Last “focus” word for Shift+click range extension (stable unlike `Set.first`).
+    /// Last "focus" word for Shift+click range extension (stable unlike `Set.first`).
     var selectionAnchorWordId: Int64?
     var currentPlayingWordId: Int64?
     var isTranscribing = false
@@ -86,7 +85,7 @@ final class TranscriptViewModel {
 
     // MARK: - WhisperKit + language
 
-    /// Tiny/Base are unreliable for forced non‑English transcription; coerce to at least `.small`.
+    /// Tiny/Base are unreliable for forced non\u{2011}English transcription; coerce to at least `.small`.
     func ensureWhisperKitModelMatchesLanguage() {
         guard selectedBackend == .whisperKit else { return }
         let code = LanguageRegistry.normalizedLanguageCode(selectedLanguage) ?? "en"
@@ -121,31 +120,24 @@ final class TranscriptViewModel {
         let progressRelay = TranscriptionProgressRelay()
         progressRelay.viewModel = self
 
-        // Inherit MainActor so Speech / TCC calls happen on the app's principal thread.
         transcriptionTask = Task { @MainActor [weak self, engine, progressRelay] in
             guard let self else { return }
 
-            // Apple Speech pre-flight: check for the required TCC entitlement BEFORE calling any
-            // Speech API. On unsigned `swift run` builds the entitlement is absent and macOS will
-            // deliberately crash the process (__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__) the moment
-            // SFSpeechRecognizer tries to contact the TCC daemon. Detecting this here lets us show
-            // a helpful error instead of a hard crash.
+            // Apple Speech pre-flight: the binary must be inside a signed .app bundle with
+            // Info.plist for tccd to find NSSpeechRecognitionUsageDescription on macOS 26+.
+            // SpeechEntitlementBootstrap.ensureEntitlement() handles this at launch via execv;
+            // if we're still not inside a bundle here, Speech WILL crash the process.
             if backend == .appleSpeech {
-                guard Self.hasSpeechRecognitionEntitlement() else {
+                guard SpeechEntitlementBootstrap.hasEntitlement,
+                      Bundle.main.object(forInfoDictionaryKey: "NSSpeechRecognitionUsageDescription") != nil
+                else {
+                    isTranscribing = false
                     transcriptionError = """
-                        Apple Speech requires a re-signed binary. \
-                        Run the app with:  ./scripts/run-with-speech-capability.sh
-                        Or switch the engine to WhisperKit (recommended — no signing needed).
+                        Apple Speech is unavailable in this build. The app tried to create \
+                        an .app bundle at launch but could not. \
+                        Run from Abscido-native/:  ./scripts/run-with-speech-capability.sh \
+                        or switch the engine to WhisperKit (no signing needed).
                         """
-                    isTranscribing = false
-                    return
-                }
-                do {
-                    try await prepareAppleSpeechAuthorization()
-                } catch {
-                    transcriptionError = Self.coherentTranscriptionError(error)
-                    isTranscribing = false
-                    transcriptionProgress = 0
                     return
                 }
             }
@@ -184,50 +176,8 @@ final class TranscriptViewModel {
         }
     }
 
-    // MARK: - Apple Speech helpers
+    // MARK: - Helpers (error formatting)
 
-    /// Returns `true` when the binary's codesign contains the speech-recognition entitlement.
-    /// A `false` result means `swift run` was used without the re-signing script; attempting to
-    /// call `SFSpeechRecognizer.requestAuthorization` would crash the process via TCC.
-    private static func hasSpeechRecognitionEntitlement() -> Bool {
-        guard let task = SecTaskCreateFromSelf(nil) else { return false }
-        let key = "com.apple.security.personal-information.speech-recognition" as CFString
-        let value = SecTaskCopyValueForEntitlement(task, key, nil)
-        return value != nil
-    }
-
-    /// Presents macOS Speech permission on the main actor before Speech touches media files.
-    private func prepareAppleSpeechAuthorization() async throws {
-        let status = SFSpeechRecognizer.authorizationStatus()
-        switch status {
-        case .authorized:
-            return
-        case .denied:
-            throw AbscidoError.transcriptionFailed(
-                clipId: 0,
-                pythonError: "Speech recognition is off. Enable Abscido in System Settings → Privacy & Security → Speech Recognition."
-            )
-        case .restricted:
-            throw AbscidoError.transcriptionFailed(
-                clipId: 0,
-                pythonError: "Speech recognition is restricted on this Mac (Screen Time or device policy)."
-            )
-        case .notDetermined:
-            let newStatus = await withCheckedContinuation { (cont: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
-                SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
-            }
-            guard newStatus == .authorized else {
-                throw AbscidoError.transcriptionFailed(
-                    clipId: 0,
-                    pythonError: "Speech recognition was not allowed. Enable it in System Settings → Privacy & Security → Speech Recognition."
-                )
-            }
-        @unknown default:
-            throw AbscidoError.transcriptionFailed(clipId: 0, pythonError: "Unknown speech authorization state.")
-        }
-    }
-
-    /// Produces clearer copy than opaque NSError descriptions for Speech / export failures.
     private static func coherentTranscriptionError(_ error: Error) -> String {
         if let abscido = error as? AbscidoError {
             return abscido.errorDescription ?? String(describing: abscido)

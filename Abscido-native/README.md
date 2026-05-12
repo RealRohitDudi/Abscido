@@ -37,14 +37,21 @@ On first transcription, macOS will ask for Speech Recognition permission. Grant 
 If the app quits with `__TCC_CRASHING_DUE_TO_PRIVACY_VIOLATION__` in the crash log:
 
 1. This project embeds **`NSSpeechRecognitionUsageDescription`** into the binary via linker `-sectcreate __TEXT __info_plist` (`Package.swift`). Run `swift build` after pulling so the Mach-O is relinked.
-2. **`swift run` does not attach Speech’s entitlement** to the ad-hoc signature (`codesign -d --entitlements`). On recent macOS, TCC validates **`com.apple.security.personal-information.speech-recognition`** in the *signed* entitlement blob; without it, Speech can still abort despite the embedded plist. From the command line, build, re-sign, and launch:
+2. **`swift run` / a plain ⌘R build** often omits Speech’s entitlement from the ad-hoc signature (`codesign -d --entitlements`). On recent macOS, TCC validates **`com.apple.security.personal-information.speech-recognition`** in the *signed* entitlement blob; without it, Speech can still abort despite the embedded plist.
+
+Use one of these **before** relying on Apple Speech:
 
 ```bash
 cd Abscido-native
 ./scripts/run-with-speech-capability.sh
+
+# Or SwiftPM command plugin (build → re-sign → launch)
+swift package plugin run-with-speech --allow-writing-to-package-directory --allow-network-connections all
 ```
 
-That uses **`Abscido/LocalSigning.entitlements`** (Speech + `get-task-allow`, intentionally **no app sandbox** so SPM dev builds keep normal filesystem access). Xcode runs use **`Abscido.entitlements`** (sandboxed) and get the same Speech capability from the project’s signing settings.
+That uses **`Abscido/LocalSigning.entitlements`** (Speech + `get-task-allow`, intentionally **no app sandbox** so local dev keeps normal filesystem access).
+
+**Xcode (Package.swift only):** The repo does **not** auto-apply entitlements to the SPM executable. Set the **Abscido** target → **Build Settings** → **Code Signing Entitlements** to `Abscido/LocalSigning.entitlements` for Debug, or launch via the script/plugin above. **`Abscido.entitlements`** (sandbox) is for distribution-style builds where you also add the Speech capability under Signing & Capabilities.
 
 #### Optional: MLX-Whisper (Higher Accuracy on Apple Silicon)
 
@@ -78,6 +85,8 @@ The key is stored securely in the macOS Keychain — never in UserDefaults or on
 1. Open `Package.swift` in Xcode
 2. Select the `Abscido` scheme
 3. Press ⌘R to build and run
+
+For **Apple Speech**, if transcription shows a re-signing error, use **Build & Run** only after setting **Code Signing Entitlements** (see Speech section above) or start the app via `./scripts/run-with-speech-capability.sh` / the `run-with-speech` package plugin.
 
 ## Architecture
 

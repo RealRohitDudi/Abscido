@@ -30,6 +30,10 @@ struct AbscidoApp: App {
     @State private var coordinator = AppCoordinator()
     private let shortcutManager = KeyboardShortcutManager.shared
 
+    init() {
+        SpeechEntitlementBootstrap.ensureEntitlement()
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

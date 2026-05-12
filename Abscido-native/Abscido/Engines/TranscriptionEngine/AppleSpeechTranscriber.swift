@@ -12,6 +12,38 @@ enum AppleSpeechTranscriber {
 
     private static let chunkSeconds: Double = 55.0
 
+    /// Ensures macOS Speech Recognition permission before touching any recogniser.
+    /// Must run on @MainActor (which we already are).
+    static func ensureAuthorization() async throws {
+        let status = SFSpeechRecognizer.authorizationStatus()
+        switch status {
+        case .authorized:
+            return
+        case .denied:
+            throw AbscidoError.transcriptionFailed(
+                clipId: 0,
+                pythonError: "Speech recognition is off. Enable Abscido in System Settings \u{2192} Privacy & Security \u{2192} Speech Recognition."
+            )
+        case .restricted:
+            throw AbscidoError.transcriptionFailed(
+                clipId: 0,
+                pythonError: "Speech recognition is restricted on this Mac (Screen Time or device policy)."
+            )
+        case .notDetermined:
+            let newStatus = await withCheckedContinuation { (cont: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
+                SFSpeechRecognizer.requestAuthorization { cont.resume(returning: $0) }
+            }
+            guard newStatus == .authorized else {
+                throw AbscidoError.transcriptionFailed(
+                    clipId: 0,
+                    pythonError: "Speech recognition was not allowed. Enable it in System Settings \u{2192} Privacy & Security \u{2192} Speech Recognition."
+                )
+            }
+        @unknown default:
+            throw AbscidoError.transcriptionFailed(clipId: 0, pythonError: "Unknown speech authorization state.")
+        }
+    }
+
     /// High-level entry: resolves locale, verifies recogniser, transcribes every chunk on the main actor.
     static func transcribe(
         mediaURL: URL,
@@ -19,6 +51,8 @@ enum AppleSpeechTranscriber {
         languageCode: String,
         onProgress: @Sendable @escaping (Double) -> Void
     ) async throws -> [TranscriptWord] {
+
+        try await ensureAuthorization()
 
         onProgress(0.05)
 
